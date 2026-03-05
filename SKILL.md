@@ -88,11 +88,7 @@ Collect any available context to help with the review:
 
 ### 3. Perform the review
 
-With full access to the source code, review the diff thoroughly. Check for:
-
-- **Bugs**: Logic errors, off-by-one mistakes, race conditions, incorrect assumptions.
-- **Security issues**: Injection, leaked secrets, missing authentication/authorization checks, unsafe deserialization.
-- **Simplification opportunities**: Overly complex code that could be clearer or shorter.
+Review the diff thoroughly. Check for bugs, security issues, and improvements that can be made through code simplification.
 
 Use the `agent` tool, `grep`, `glob`, `view`, and other read-only tools to explore the codebase for additional context as needed. Specifically:
 
