@@ -24,7 +24,19 @@ This skill activates when the user asks to review code changes, e.g.:
 
 ## Procedure
 
-### 1. Detect the base ref and generate the diff
+### 1. Check for unstaged changes
+
+Before doing anything else, run:
+
+```bash
+git status
+```
+
+If there are any staged or unstaged changes, **immediately abort the review**. Inform the user that the review cannot begin until the working directory is clean. Do NOT write a review file or continue with any subsequent steps.
+
+Note: untracked files are acceptable — only staged or unstaged changes to tracked files block the review.
+
+### 2. Detect the base ref and generate the diff
 
 Determine the base branch, temporarily merge it into a detached HEAD (so the user's branch is untouched), and generate the diff. Run this as a **single** bash command so that shell variables persist:
 
@@ -72,13 +84,11 @@ If the merge fails (conflict), restore the branch, report the conflict to the us
 
 The detached-HEAD merge ensures the diff reflects the changes as they will look once merged into the base branch, catching interactions with recent base branch changes, without modifying the user's branch.
 
-Also check for **uncommitted changes** (staged or unstaged). If present, include them in the review by also running `git diff HEAD` (with the same exclusions) and appending that output. Mention in the review header that uncommitted changes were included.
-
 If the diff is empty, write a short note to the output file saying there are no changes to review and stop.
 
 If the diff exceeds 100,000 characters, do NOT try to review it all at once. Instead, note that the diff is large, then review the changes file-by-file: use `git diff "$BASE_REF" --name-only -- . <same exclusions as above>` to list changed files, then examine each file's diff individually with `git diff "$BASE_REF" -- <file>` and the source via `view`. Prioritize the most critical files first.
 
-### 2. Gather context
+### 3. Gather context
 
 Collect any available context to help with the review:
 
@@ -86,7 +96,7 @@ Collect any available context to help with the review:
 - Check `git log --oneline "$BASE_REF"..HEAD` to understand the commit history of the changes.
 - If the user provided a PR description or additional context, incorporate it.
 
-### 3. Perform the review
+### 4. Perform the review
 
 Review the diff thoroughly. Check for bugs, security issues, and improvements that can be made through code simplification.
 
@@ -99,7 +109,7 @@ Use the `agent` tool, `grep`, `glob`, `view`, and other read-only tools to explo
 
 **DO NOT modify any source files during the review.** The only file you write is the review output file.
 
-### 4. Format and write the review
+### 5. Format and write the review
 
 Write the review to the output file. The examples below show the desired structure (the fences are illustrative — do NOT wrap the actual output file content in a code fence):
 
@@ -143,6 +153,6 @@ Each issue:
 - Do NOT comment on code that has no issues (no "looks good!" fluff).
 - If no problems are found, state that clearly and stop.
 
-### 5. Report completion
+### 6. Report completion
 
 After writing the review file, give a brief summary to the user: how many issues were found at each severity level, and the output file path.
