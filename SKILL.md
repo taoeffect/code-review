@@ -7,35 +7,46 @@ description: "Performs an agentic code review of recent changes and outputs the 
 
 Performs a thorough code review of changes in the current git repository by examining the diff, exploring the codebase for additional context, and producing a structured Markdown review.
 
+## Activation
+
+This skill activates when the user asks to review code changes, e.g.:
+
+- "create a review and output it to REVIEW.md"
+- "review the changes on this branch"
+- "code review"
+
 ## Parameters
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | Output file | `REVIEW.md` | Where to write the review. Use whatever the user specifies, or default to `REVIEW.md` in the project root. |
-| Base ref | auto-detected | The base branch/ref to diff against. Auto-detects `main` or `master` and uses the merge-base for a clean diff. The user can override this explicitly. |
+| Base ref | auto-detected | The base branch/ref to diff against. Auto-detects `main` or `master`. Temporarily merges the base into a detached HEAD to produce an accurate diff. The user can override this explicitly. |
 
 ## Procedure
 
 ### 1. Detect the base ref and generate the diff
 
-Determine the base branch, compute the merge-base, and generate the diff. Run this as a **single** bash command so that shell variables persist:
+Determine the base branch, temporarily merge it into a detached HEAD (so the user's branch is untouched), and generate the diff. Run this as a **single** bash command so that shell variables persist:
 
 ```bash
-BASE_REF="" && \
-if git rev-parse --verify origin/main >/dev/null 2>&1; then
-  BASE_REF="origin/main"
-elif git rev-parse --verify main >/dev/null 2>&1; then
+BASE_REF="" &&
+if git rev-parse --verify main >/dev/null 2>&1; then
   BASE_REF="main"
-elif git rev-parse --verify origin/master >/dev/null 2>&1; then
-  BASE_REF="origin/master"
 elif git rev-parse --verify master >/dev/null 2>&1; then
   BASE_REF="master"
 else
   echo "ERROR: Could not find main or master branch" >&2; exit 1
-fi && \
-MERGE_BASE=$(git merge-base HEAD "$BASE_REF") && \
-echo "BASE_REF=$BASE_REF  MERGE_BASE=$MERGE_BASE" && \
-git diff "$MERGE_BASE" -U15 \
+fi &&
+ORIG_BRANCH=$(git branch --show-current) &&
+git checkout --detach HEAD &&
+if ! git merge --no-edit "$BASE_REF" 2>/dev/null; then
+  git merge --abort 2>/dev/null
+  git checkout "$ORIG_BRANCH"
+  echo "ERROR: Merge conflict with $BASE_REF. Resolve conflicts before reviewing." >&2
+  exit 1
+fi &&
+echo "BASE_REF=$BASE_REF" &&
+git diff "$BASE_REF" -U15 \
   -- . \
   ':!**/package-lock.json' \
   ':!**/pnpm-lock.yaml' \
@@ -51,18 +62,28 @@ git diff "$MERGE_BASE" -U15 \
   ':!**/*.woff' ':!**/*.woff2' ':!**/*.ttf' ':!**/*.eot'
 ```
 
+**After capturing the diff output**, immediately restore the user's branch:
+
+```bash
+git checkout "$ORIG_BRANCH"
+```
+
+If the merge fails (conflict), restore the branch, report the conflict to the user, and **stop** — do not write a review file or continue.
+
+The detached-HEAD merge ensures the diff reflects the changes as they will look once merged into the base branch, catching interactions with recent base branch changes, without modifying the user's branch.
+
 Also check for **uncommitted changes** (staged or unstaged). If present, include them in the review by also running `git diff HEAD` (with the same exclusions) and appending that output. Mention in the review header that uncommitted changes were included.
 
 If the diff is empty, write a short note to the output file saying there are no changes to review and stop.
 
-If the diff exceeds 100,000 characters, do NOT try to review it all at once. Instead, note that the diff is large, then review the changes file-by-file: use `git diff "$MERGE_BASE" --name-only -- . <same exclusions as above>` to list changed files, then examine each file's diff individually with `git diff "$MERGE_BASE" -- <file>` and the source via `view`. Prioritize the most critical files first.
+If the diff exceeds 100,000 characters, do NOT try to review it all at once. Instead, note that the diff is large, then review the changes file-by-file: use `git diff "$BASE_REF" --name-only -- . <same exclusions as above>` to list changed files, then examine each file's diff individually with `git diff "$BASE_REF" -- <file>` and the source via `view`. Prioritize the most critical files first.
 
 ### 2. Gather context
 
 Collect any available context to help with the review:
 
 - Read the project's `AGENTS.md`, `CLAUDE.md`, `CRUSH.md`, or `README.md` if they exist (these should already be loaded as memory files — only read them if you haven't already).
-- Check `git log --oneline "$MERGE_BASE"..HEAD` to understand the commit history of the changes.
+- Check `git log --oneline "$BASE_REF"..HEAD` to understand the commit history of the changes.
 - If the user provided a PR description or additional context, incorporate it.
 
 ### 3. Perform the review
