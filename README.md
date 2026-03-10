@@ -4,3 +4,9 @@ An agent skill to perform a sophisticated and comprehensive code review, outputt
 
 > [!IMPORTANT]
 > Before running this command you need to commit all changes so that current working directory is clean!
+
+## Installation
+
+```
+$ npx skills add taoeffect/code-review
+```
