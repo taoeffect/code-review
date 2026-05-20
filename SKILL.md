@@ -98,7 +98,7 @@ Collect any available context to help with the review:
 
 ### 4. Perform the review
 
-Review the diff thoroughly. Check for bugs, security issues, and improvements that can be made through code simplification.
+Review the diff thoroughly. Check for bugs, security issues, DRY violations, and improvements that can be made through code simplification.
 
 Use the `agent` tool, `grep`, `glob`, `view`, and other read-only tools to explore the codebase for additional context as needed. Specifically:
 
