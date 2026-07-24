@@ -120,6 +120,7 @@ Review header:
     **Base**: `<base_ref>`
     **Head**: `<current branch or HEAD>`
     **Date**: <today's date>
+    **Model**: <if known, model name used for review here>
 
     ---
 
