@@ -88,7 +88,11 @@ Use subagents to review every changed line without placing the complete diff in 
 
 1. **Partition the diff intelligently.** Create self-contained slice files inside `DIFF_DIR`. Each slice should contain no more than approximately 800 changed lines and must retain the file headers and hunk headers needed to understand its patch. Prefer groups of related files or coherent changes. Keep a file together when it fits. Split an oversized file at coherent hunk boundaries when needed; never split in the middle of a hunk. Record the files, or file portions, included in every slice.
 2. **Balance cohesion and size.** Use only as many subagents as the changed-line count requires. For example, when one large file accounts for most of fewer than 1,600 changed lines, assign that file primarily to one subagent and the smaller files to a second. If the smaller files exceed the second slice's capacity, move coherent hunks or files to the first slice while keeping both near the 800-line target. Do not create three slices when two balanced, coherent slices are sufficient.
-3. **Review in batches.** Assign one slice to each subagent, with at most three subagents in a batch. Wait until every subagent in the current batch has reported before starting the next batch. If the PR exceeds approximately 2,400 changed lines, continue with additional batches of up to three subagents until all slices have been reviewed.
+3. **Review in batches.** Assign one slice to each subagent, with at most three subagents per batch. Use the launch method named in the system prompt:
+   - **OMP:** Launch each packet with the native `task` tool and the `reviewer` agent.
+   - **Crush:** First call `crush_info`. From its `[model]` section, convert each `model (provider)` value to `provider/model`. Then launch each packet from the project root with the Bash tool, `run_in_background: true`, and `crush run -q -m <large> --small-model <small> "$PROMPT"`. For example, `glm-5.3 (zai)` becomes `zai/glm-5.3`. Collect every result with `job_output`.
+
+   Wait for all subagents in the current batch before starting the next. Continue in batches of up to three until every slice is reviewed.
 4. **Give each subagent a complete review packet.** Its instructions must contain:
    - the applicable instructions from Section 3, including all additional context and instructions supplied by the user;
    - the path to its slice diff file and an explicit statement that this is the diff it must review;
