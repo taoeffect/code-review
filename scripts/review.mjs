@@ -101,6 +101,14 @@ Commands:
       --target <lines>     Changed lines to aim for in one slice.
                            Default: ${DEFAULT_TARGET}.
 
+  clean --run-dir <path> | --all
+      Remove run folders. Only folders this tool created, directly under
+      <git-common-dir>/code-review/, can be removed. Prints one JSON object on
+      stdout naming what was removed.
+
+      --run-dir <path>     The one run folder to remove.
+      --all                Remove every run folder left in the run root.
+
 Exit codes:
   0  ready
   1  failed
@@ -196,7 +204,7 @@ function prep(args) {
     return EXIT.conflict;
   }
 
-  const runRoot = join(gitCommonDir(opts), RUN_ROOT_NAME);
+  const runRoot = managedRunRoot(opts);
   const stale = sweepRuns(runRoot);
   if (stale.length > 0) {
     warn(`Removed ${stale.length} run folder(s) left by an interrupted review.`);
@@ -306,6 +314,35 @@ function split(args) {
   return EXIT.ok;
 }
 
+/**
+ * Remove run folders. `--run-dir` ends one finished review. `--all` is the
+ * recovery form for when the run folder of an interrupted review is no longer
+ * known. Both go through the same two guards as `split`, so the only folders
+ * this can delete are the marked direct children of the run root.
+ */
+function clean(args) {
+  const flags = parseFlags(args, { runDir: "value", all: "flag" });
+  const one = flags.runDir !== undefined;
+  const sweep = flags.all === true;
+  // Checked before any git call, so a mistyped command line says so plainly
+  // even outside a repository.
+  if (one && sweep) throw new UsageError("clean takes --run-dir <path> or --all, not both.");
+  if (!one && !sweep) throw new UsageError("clean needs --run-dir <path> or --all.");
+
+  const runRoot = managedRunRoot();
+  let removed;
+  if (sweep) {
+    removed = sweepRuns(runRoot);
+  } else {
+    const runDir = resolveManagedRun(flags.runDir, runRoot);
+    rmSync(runDir, { recursive: true, force: true });
+    removed = [runDir];
+  }
+
+  print({ runRoot, removed });
+  return EXIT.ok;
+}
+
 /** Name every problem on stderr, then hand back the self-check exit code. */
 function reportProblems(what, problems) {
   warn(`${what} found ${problems.length} problem(s):`);
@@ -328,9 +365,7 @@ function wholeNumber(raw, name, fallback) {
  * every delete outside `prep` goes through here, so a typo, a symlink, or a
  * relative path cannot reach past `<git-common-dir>/code-review/`.
  */
-function resolveManagedRun(candidate) {
-  // No work-tree lookup here, so split still runs from inside the git folder.
-  const runRoot = join(gitCommonDir(), RUN_ROOT_NAME);
+function resolveManagedRun(candidate, runRoot = managedRunRoot()) {
   let root;
   try {
     root = realpathSync(runRoot);
@@ -350,6 +385,15 @@ function resolveManagedRun(candidate) {
     throw new ReviewError(`--run-dir "${candidate}" holds no ${MARKER_NAME} file, so this tool did not create it.`);
   }
   return real;
+}
+
+/**
+ * Where every run folder lives. No work-tree lookup, so the commands that only
+ * need this still work from inside the git folder, where `git rev-parse
+ * --show-toplevel` fails.
+ */
+function managedRunRoot(opts = {}) {
+  return join(gitCommonDir(opts), RUN_ROOT_NAME);
 }
 
 /** One JSON object, pretty-printed, and nothing else on stdout. */
@@ -411,7 +455,7 @@ function isMarkedRun(dir) {
   }
 }
 
-const COMMANDS = { prep, split };
+const COMMANDS = { prep, split, clean };
 
 function main(argv) {
   const [command, ...rest] = argv;
