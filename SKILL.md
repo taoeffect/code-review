@@ -5,114 +5,75 @@ description: "Performs an agentic code review of recent changes and outputs the 
 
 # Agentic Code Review
 
-Performs a thorough code review of changes in the current git repository by examining the diff, exploring the codebase for additional context, and producing a structured Markdown review.
+Review the merged result of the current branch against its base. Inspect every
+changed line and write one Markdown review. The output defaults to `REVIEW.md` in
+the project root unless the user names another file. Set `<skill-dir>` to the
+directory containing this file.
 
-## Parameters
+## 1. Prepare
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| Output file | `REVIEW.md` | Where to write the review. Use whatever the user specifies, or default to `REVIEW.md` in the project root. |
-| Base ref | auto-detected | The base branch/ref to diff against. Auto-detects `main` or `master`. Temporarily merges the base into a detached HEAD to produce an accurate diff. The user can override this explicitly. |
-
-## Procedure
-
-### 1. Check for unstaged changes
-
-Before doing anything else, run:
+From the repository, run:
 
 ```bash
-git status
+node <skill-dir>/scripts/review.mjs prep [--base <ref>] [--exclude <pattern>]...
 ```
 
-If there are any staged or unstaged changes, **immediately abort the review**. Inform the user that the review cannot begin until the working directory is clean. Do NOT write a review file or continue with any subsequent steps.
+The default base is local `main`, then local `master`. Pass a user-supplied base
+to `--base`. `prep` uses local refs and does not fetch. It prints one JSON object
+to stdout; warnings and errors go to stderr. Keep all reported fields.
 
-Untracked files are acceptable — only staged or unstaged changes to tracked files block the review.
+The command creates `diffFile` and `sourceDir` from a virtual merge. It never
+writes to HEAD, the real index, or working files. Inspect source under
+`sourceDir`, because it matches the diff. Untracked files do not block the run.
 
-### 2. Detect the base ref and save the diff
+Exit codes: 0 ready; 1 other failure; 2 staged or unstaged tracked changes; 3
+merge conflict; 4 missing or invalid base; 5 Git older than 2.38; 6 failed split
+self-check. On nonzero, report the stated problem and stop. For code 2, ask the
+user to commit, stash, or discard the changes. A base-behind warning concerns the
+existing local tracking ref only.
 
-Determine the base branch, temporarily merge it into a detached HEAD (so the user's branch is untouched), and save the complete diff in a dedicated temporary directory. Run this as a **single** bash command so that shell variables persist:
+If `totalChanged` is zero, write a no-changes note, clean as in Section 5, and
+stop. If `massive` is false, review the complete `diffFile` using Sections 3 and
+4. Otherwise, continue below.
+
+## 2. Split and delegate a massive review
+
+At 1,000 changed lines or more, run:
 
 ```bash
-BASE_REF="" &&
-if git rev-parse --verify main >/dev/null 2>&1; then
-  BASE_REF="main"
-elif git rev-parse --verify master >/dev/null 2>&1; then
-  BASE_REF="master"
-else
-  echo "ERROR: Could not find main or master branch" >&2; exit 1
-fi &&
-ORIG_BRANCH=$(git branch --show-current) &&
-DIFF_DIR=$(mktemp -d) &&
-DIFF_FILE="$DIFF_DIR/full.diff" &&
-git checkout --detach HEAD &&
-if ! git merge --no-edit "$BASE_REF" 2>/dev/null; then
-  git merge --abort 2>/dev/null
-  git checkout "$ORIG_BRANCH"
-  rm -rf "$DIFF_DIR"
-  echo "ERROR: Merge conflict with $BASE_REF. Resolve conflicts before reviewing." >&2
-  exit 1
-fi &&
-git diff "$BASE_REF" -U15 \
-  -- . \
-  ':!**/package-lock.json' \
-  ':!**/pnpm-lock.yaml' \
-  ':!**/yarn.lock' \
-  ':!**/go.sum' \
-  ':!**/*.min.js' ':!**/*.min.css' \
-  ':!**/node_modules/**' \
-  ':!**/vendor/**' \
-  ':!**/dist/**' \
-  ':!**/build/**' \
-  ':!**/*.svg' ':!**/*.png' ':!**/*.jpg' ':!**/*.jpeg' \
-  ':!**/*.gif' ':!**/*.ico' ':!**/*.webp' \
-  ':!**/*.woff' ':!**/*.woff2' ':!**/*.ttf' ':!**/*.eot' \
-  > "$DIFF_FILE" &&
-git checkout "$ORIG_BRANCH" &&
-printf 'BASE_REF=%s\nDIFF_DIR=%s\nDIFF_FILE=%s\nDIFF_BYTES=%s\n' \
-  "$BASE_REF" "$DIFF_DIR" "$DIFF_FILE" "$(wc -c < "$DIFF_FILE")"
+node <skill-dir>/scripts/review.mjs split --run-dir <runDir> [--target <lines>]
 ```
 
-Record the printed paths. Use `DIFF_FILE` as the complete diff source for the review and keep `DIFF_DIR` until the review is finished.
+The default target is 800. The printed JSON is also `manifest.json`. It lists
+slice paths, changed-line totals, file parts, new-line ranges, oversized status,
+and suggested batches. A slice exceeds the target only when one indivisible hunk
+does; it is then marked `oversized`. Slice IDs need not follow a large file's
+reading order. Use manifest assignments. Suggested batches are optional; regroup
+related slices if useful, with at most three agents per batch and full coverage.
 
-If the merge fails (conflict), restore the branch, report the conflict to the user, and **stop** — do not write a review file or continue.
+- **OMP:** Use one native `task` per slice with the `reviewer` agent. Put the
+  shared review contract in batch `context` and slice data in each task. Wait for
+  the full batch before starting the next.
+- **Crush:** Call `crush_info`. Convert `model (provider)` to `provider/model`.
+  From `sourceDir`, start at most three background processes with
+  `crush run -q -m <large> --small-model <small> "$PROMPT"`. Collect each with
+  `job_output`. Wait for the full batch before starting the next.
 
-The detached-HEAD merge ensures the diff reflects the changes as they will look once merged into the base branch, catching interactions with recent base branch changes, without modifying the user's branch.
+Each packet identifies `sourceDir`, its slice diff, and the exact manifest file
+parts and ranges. Include Sections 3 and 4 plus all user context. Require
+read-only inspection, full assigned coverage, and findings returned to the
+parent in the Section 4 format. Permit wider source inspection only for context.
+Do not let workers launch subagents or write the final review.
 
-If `DIFF_FILE` is empty, write a short note to the output file saying there are no changes to review, remove `DIFF_DIR`, and stop.
+The parent verifies findings against `sourceDir` and the complete `diffFile`,
+removes duplicates, resolves cross-slice findings, confirms every assignment was
+covered, and writes the final review.
 
-Determine the number of changed lines in `DIFF_FILE`, both in total and per file. A changed line is an added or deleted source line; do not count diff headers, hunk headers, or unchanged context lines. A **massive PR** is one with at least 1,000 changed lines. Review smaller PRs directly by continuing to Section 3. For a massive PR, follow the process below.
+## 3. Gather context and review
 
-#### Massive PR process
-
-Use subagents to review every changed line without placing the complete diff in one agent's context.
-
-1. **Partition the diff intelligently.** Create self-contained slice files inside `DIFF_DIR`. Each slice should contain no more than approximately 800 changed lines and must retain the file headers and hunk headers needed to understand its patch. Prefer groups of related files or coherent changes. Keep a file together when it fits. Split an oversized file at coherent hunk boundaries when needed; never split in the middle of a hunk. Record the files, or file portions, included in every slice.
-2. **Balance cohesion and size.** Use only as many subagents as the changed-line count requires. For example, when one large file accounts for most of fewer than 1,600 changed lines, assign that file primarily to one subagent and the smaller files to a second. If the smaller files exceed the second slice's capacity, move coherent hunks or files to the first slice while keeping both near the 800-line target. Do not create three slices when two balanced, coherent slices are sufficient.
-3. **Review in batches.** Assign one slice to each subagent, with at most three subagents per batch. Use the launch method named in the system prompt:
-   - **OMP:** Launch each packet with the native `task` tool and the `reviewer` agent.
-   - **Crush:** First call `crush_info`. From its `[model]` section, convert each `model (provider)` value to `provider/model`. Then launch each packet from the project root with the Bash tool, `run_in_background: true`, and `crush run -q -m <large> --small-model <small> "$PROMPT"`. For example, `glm-5.3 (zai)` becomes `zai/glm-5.3`. Collect every result with `job_output`.
-
-   Wait for all subagents in the current batch before starting the next. Continue in batches of up to three until every slice is reviewed.
-4. **Give each subagent a complete review packet.** Its instructions must contain:
-   - the applicable instructions from Section 3, including all additional context and instructions supplied by the user;
-   - the path to its slice diff file and an explicit statement that this is the diff it must review;
-   - the exact list of files and file portions for which it is responsible;
-   - the review instructions from Section 4;
-   - the issue format, severity definitions, and rules from Section 5; and
-   - an instruction to report its findings to the parent agent rather than write the final review file.
-
-   The packet should otherwise preserve the substance of this skill, except for instructions about creating or launching subagents. Subagents may inspect the wider codebase with read-only tools for context, but they must review every assigned change and avoid reviewing unassigned changes unless needed to explain a cross-file issue.
-5. **Integrate the reports.** After all batches finish, verify the reported issues against the source and complete diff, remove duplicates, reconcile cross-slice findings, order all valid issues by severity, and write one final review using Section 5. The parent agent remains responsible for full coverage and the final review.
-
-### 3. Gather context
-
-Collect any available context to help with the review:
-
-- Read the project's `AGENTS.md`, `CLAUDE.md`, `CRUSH.md`, or `README.md` if they exist (these should already be loaded as memory files — only read them if you haven't already).
-- Check `git log --oneline "$BASE_REF"..HEAD` to understand the commit history of the changes.
-- If the user provided a PR description or additional context, incorporate it.
-
-### 4. Perform the review
+Read each reported context file from `sourceDir` unless already available. Apply
+its normal directory scope. Use the reported commit subjects, the PR description,
+and every user instruction.
 
 Review the diff thoroughly. Check for bugs, security issues, DRY violations, and improvements that can be made through code simplification.
 
@@ -125,7 +86,7 @@ Use read-only tool calls to explore the codebase for additional context as neede
 
 **DO NOT modify any source files during the review.** Apart from the temporary diff, the only file you write is the review output file.
 
-### 5. Format and write the review
+## 4. Format and write the review
 
 Write the review to the output file. The examples below show the desired structure (the fences are illustrative — do NOT wrap the actual output file content in a code fence):
 
@@ -170,6 +131,15 @@ Each issue:
 - Do NOT comment on code that has no issues (no "looks good!" fluff).
 - If no problems are found, state that clearly and stop.
 
-### 6. Report completion
+## 5. Clean up and report
 
-After writing the review file, remove `DIFF_DIR`, then give a brief summary to the user: how many issues were found at each severity level, and the output file path.
+After writing the review, run once:
+
+```bash
+node <skill-dir>/scripts/review.mjs clean --run-dir <runDir>
+```
+
+A missing run is refused. If its path is lost, use `clean --all`; it removes only
+marked tool-owned runs. Both forms print `{ "runRoot": ..., "removed": [...] }`.
+Clean a known run after a later failure too. Then report the output path and issue
+count at each severity.
