@@ -327,7 +327,8 @@ export function sliceText(slice) {
  * The biggest work goes first, then the small files even the slices out. A file
  * that fits stays whole. A file that does not fit is cut at hunk boundaries
  * only. A single hunk over the target keeps its own slice, which is marked
- * oversized.
+ * oversized. Every other slice stays within the target, so the slice count can
+ * be more than `ceil(total / target)` when the work does not pack neatly.
  *
  * Returns `{ target, total, sliceCount, oversized, slices, batches }`, where a
  * slice is `{ id, index, path, changed, oversized, parts }` and a part is
@@ -339,7 +340,6 @@ export function planSlices({ files, target = DEFAULT_TARGET }) {
   if (!(target > 0)) throw new RangeError(`target must be a positive number, got ${target}`);
   const total = files.reduce((sum, file) => sum + file.changed, 0);
   const units = unitsFor(files, target);
-  const wanted = Math.max(1, Math.ceil(total / target));
 
   units.sort(byWorkThenPlace);
   const bins = [];
@@ -357,12 +357,12 @@ export function planSlices({ files, target = DEFAULT_TARGET }) {
     if (roomy) {
       roomy.units.push(unit);
       roomy.changed += unit.changed;
-    } else if (bins.length < wanted) {
-      bins.push({ units: [unit], changed: unit.changed });
     } else {
-      const emptiest = bins.reduce((best, bin) => (best.changed <= bin.changed ? best : bin), bins[0]);
-      emptiest.units.push(unit);
-      emptiest.changed += unit.changed;
+      // Nothing has room, so open a slice rather than push one over the target.
+      // `unitsFor` already cut every unit down to the target, so a fresh slice
+      // always fits it. That is what makes "every slice is within the target,
+      // unless one hunk alone beats it" true, and `checkPlan` proves it.
+      bins.push({ units: [unit], changed: unit.changed });
     }
   }
 
@@ -558,8 +558,9 @@ export function checkParse(parsed) {
 
 /**
  * Check a plan against the diff it came from. An empty list means every file
- * section and every hunk is in exactly one slice, the slice totals add up, and
- * the slices rebuild each file section byte for byte.
+ * section and every hunk is in exactly one slice, the slice totals add up, every
+ * slice is within the target unless one hunk forces it over, and the slices
+ * rebuild each file section byte for byte.
  */
 export function checkPlan(parsed, plan) {
   const problems = [];
@@ -580,6 +581,9 @@ export function checkPlan(parsed, plan) {
     }
     if (sliceChanged !== slice.changed) {
       problems.push(`${slice.id}: reports ${slice.changed} changed lines, but its files hold ${sliceChanged}`);
+    }
+    if (slice.changed > plan.target && !slice.oversized) {
+      problems.push(`${slice.id}: holds ${slice.changed} changed lines, over the target of ${plan.target}, yet no single hunk forces it`);
     }
     planned += sliceChanged;
   }

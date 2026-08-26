@@ -6,8 +6,18 @@
 // and only folders holding this tool's marker file are ever deleted.
 
 import { randomBytes } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
 
 import {
   DEFAULT_EXCLUDES,
@@ -28,10 +38,21 @@ import {
   totalChanged,
 } from "./lib/git.mjs";
 
+import {
+  DEFAULT_TARGET,
+  SLICE_DIR,
+  checkParse,
+  checkPlan,
+  describePlan,
+  parseDiff,
+  planSlices,
+  sliceText,
+} from "./lib/diff.mjs";
+
 const CLI = "review.mjs";
 
 /** Documented in `SKILL.md`. Callers depend on these numbers. */
-const EXIT = { ok: 0, failed: 1, dirty: 2, conflict: 3, baseRef: 4, gitTooOld: 5 };
+const EXIT = { ok: 0, failed: 1, dirty: 2, conflict: 3, baseRef: 4, gitTooOld: 5, check: 6 };
 
 /** A review of this many changed lines or more is split across subagents. */
 const MASSIVE_CHANGED_LINES = 1000;
@@ -44,6 +65,14 @@ const DIFF_CONTEXT = 10;
 const CONTEXT_FILES = ["AGENTS.md", "CLAUDE.md", "CRUSH.md", "README.md"];
 
 class UsageError extends Error {}
+
+/** A failure we can state in one line. `report` prints it without a stack. */
+class ReviewError extends Error {
+  constructor(message, exitCode = EXIT.failed) {
+    super(message);
+    this.exitCode = exitCode;
+  }
+}
 
 const warn = (text) => process.stderr.write(`${text}\n`);
 
@@ -62,6 +91,16 @@ Commands:
       --exclude <pattern>  Extra path pattern to leave out of the diff.
                            Repeatable. Added to the built-in list.
 
+  split --run-dir <path> [--target <lines>]
+      Cut the run's full.diff into slices of about --target changed lines, at
+      file and hunk boundaries only. Writes slices/slice-NN.diff and
+      manifest.json into the run folder, then checks that the slices hold every
+      hunk of the diff. Prints one JSON object on stdout.
+
+      --run-dir <path>     Run folder printed by prep. Required.
+      --target <lines>     Changed lines to aim for in one slice.
+                           Default: ${DEFAULT_TARGET}.
+
 Exit codes:
   0  ready
   1  failed
@@ -69,6 +108,7 @@ Exit codes:
   3  merging the base branch conflicts
   4  the base ref is missing or names no commit
   5  git is older than 2.38
+  6  a self-check failed
 `;
 }
 
@@ -199,6 +239,119 @@ function prep(args) {
   }
 }
 
+/**
+ * Cut a prepared diff into review-sized slices, then prove the cut lost
+ * nothing. A quiet bad split is the fault worth catching here: without the
+ * checks below, a dropped hunk means code that no one reviews and nothing
+ * reports.
+ */
+function split(args) {
+  const flags = parseFlags(args, { runDir: "value", target: "value" });
+  if (flags.runDir === undefined) throw new UsageError("split needs --run-dir <path>.");
+  const target = wholeNumber(flags.target, "--target", DEFAULT_TARGET);
+
+  const runDir = resolveManagedRun(flags.runDir);
+  const diffFile = join(runDir, "full.diff");
+  let source;
+  try {
+    source = readFileSync(diffFile, "utf8");
+  } catch {
+    throw new ReviewError(`${diffFile} is missing, so this run folder is not a finished prep.`);
+  }
+
+  const parsed = parseDiff(source);
+  for (const text of parsed.warnings) warn(`diff: ${text}`);
+
+  const parseProblems = checkParse(parsed);
+  if (parseProblems.length > 0) return reportProblems("Reading the diff", parseProblems);
+
+  const plan = planSlices({ files: parsed.files, target });
+  const planProblems = checkPlan(parsed, plan);
+  if (planProblems.length > 0) return reportProblems("Slicing the diff", planProblems);
+
+  const sliceDir = join(runDir, SLICE_DIR);
+  // A second split with a different target would otherwise leave the extra
+  // slice files of the first one behind, and an agent could review a stale one.
+  rmSync(sliceDir, { recursive: true, force: true });
+  mkdirSync(sliceDir, { recursive: true });
+  const writeProblems = [];
+  for (const slice of plan.slices) {
+    const text = sliceText(slice);
+    const path = join(runDir, slice.path);
+    writeFileSync(path, text);
+    const written = statSync(path).size;
+    const expected = Buffer.byteLength(text);
+    if (written !== expected) writeProblems.push(`${slice.path}: wrote ${written} bytes, expected ${expected}`);
+  }
+  if (writeProblems.length > 0) return reportProblems("Writing the slices", writeProblems);
+
+  if (plan.sliceCount === 0) warn("The diff holds no file sections, so no slices were written.");
+  if (plan.oversized) {
+    warn("Some slices hold a single hunk larger than the target and could not be cut further.");
+  }
+
+  const sourceDir = join(runDir, "source");
+  if (!existsSync(sourceDir)) warn(`${sourceDir} is missing, so reviewers have no merged source to read.`);
+
+  const manifest = {
+    runDir,
+    diffFile,
+    sourceDir,
+    sliceDir,
+    manifestFile: join(runDir, "manifest.json"),
+    ...describePlan(plan),
+  };
+  writeFileSync(manifest.manifestFile, `${JSON.stringify(manifest, null, 2)}\n`);
+  print(manifest);
+  return EXIT.ok;
+}
+
+/** Name every problem on stderr, then hand back the self-check exit code. */
+function reportProblems(what, problems) {
+  warn(`${what} found ${problems.length} problem(s):`);
+  for (const problem of problems) warn(`  ${problem}`);
+  warn("The slices are therefore not trustworthy. Nothing was reviewed.");
+  return EXIT.check;
+}
+
+function wholeNumber(raw, name, fallback) {
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new UsageError(`${name} needs a whole number of 1 or more, got "${raw}"`);
+  }
+  return value;
+}
+
+/**
+ * Turn a path from the caller into a run folder this tool owns. Every write and
+ * every delete outside `prep` goes through here, so a typo, a symlink, or a
+ * relative path cannot reach past `<git-common-dir>/code-review/`.
+ */
+function resolveManagedRun(candidate) {
+  // No work-tree lookup here, so split still runs from inside the git folder.
+  const runRoot = join(gitCommonDir(), RUN_ROOT_NAME);
+  let root;
+  try {
+    root = realpathSync(runRoot);
+  } catch {
+    throw new ReviewError(`${runRoot} does not exist, so there are no runs. Run prep first.`);
+  }
+  let real;
+  try {
+    real = realpathSync(candidate);
+  } catch {
+    throw new ReviewError(`--run-dir "${candidate}" does not exist.`);
+  }
+  if (dirname(real) !== root) {
+    throw new ReviewError(`--run-dir "${candidate}" is not a run folder directly under ${root}.`);
+  }
+  if (!isMarkedRun(real)) {
+    throw new ReviewError(`--run-dir "${candidate}" holds no ${MARKER_NAME} file, so this tool did not create it.`);
+  }
+  return real;
+}
+
 /** One JSON object, pretty-printed, and nothing else on stdout. */
 function print(payload) {
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
@@ -258,7 +411,7 @@ function isMarkedRun(dir) {
   }
 }
 
-const COMMANDS = { prep };
+const COMMANDS = { prep, split };
 
 function main(argv) {
   const [command, ...rest] = argv;
@@ -275,6 +428,10 @@ function report(error) {
   if (error instanceof UsageError) {
     warn(`${error.message}\nTry "node ${CLI} --help".`);
     return EXIT.failed;
+  }
+  if (error instanceof ReviewError) {
+    warn(error.message);
+    return error.exitCode;
   }
   if (error instanceof GitError) {
     warn(error.message);
