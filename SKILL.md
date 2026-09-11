@@ -120,7 +120,7 @@ Each issue:
 |-------|---------|
 | 🔴 | High importance AND high confidence |
 | 🟡 | Medium importance AND high confidence |
-| ⚪️ | Lower confidence OR lower importance |
+| ⚪ | Lower confidence OR lower importance |
 
 **Rules:**
 
