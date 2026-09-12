@@ -544,8 +544,9 @@ function newLineRange(hunk) {
  * input, every `diff --git` and `@@` line could be read, and every hunk header
  * agrees with the lines below it.
  *
- * The whole-diff check walks offsets with `startsWith`, so a diff of any size
- * never gets rebuilt as a second string in memory.
+ * Both the whole-diff check and the per-section check walk offsets with
+ * `startsWith`, so neither the diff nor its biggest file section is ever
+ * rebuilt as a second string in memory.
  */
 export function checkParse(parsed) {
   const problems = [];
@@ -569,11 +570,13 @@ export function checkParse(parsed) {
     if (file.pathsUnreadable) {
       problems.push(`could not read the paths from: ${firstLine(file.header)}`);
     }
-    if (file.header + file.hunks.map((hunk) => hunk.text).join("") !== file.text) {
-      problems.push(`${file.path}: header plus hunks do not rebuild the file section`);
-    }
     let added = 0;
     let deleted = 0;
+    // The header and the hunks are matched against the section by offset, not
+    // joined into a copy of it: a diff dominated by one huge file would
+    // otherwise be held in memory twice.
+    let covered = file.header.length;
+    let rebuilds = file.text.startsWith(file.header);
     // An unreadable `@@` line gives no line counts, so the count check below
     // compares 0 with 0 and passes while the hunk body sits outside every
     // count. Fatal, or the manifest would claim the work is smaller than it is.
@@ -589,6 +592,11 @@ export function checkParse(parsed) {
       }
       added += hunk.added;
       deleted += hunk.deleted;
+      if (rebuilds && file.text.startsWith(hunk.text, covered)) covered += hunk.text.length;
+      else rebuilds = false;
+    }
+    if (!rebuilds || covered !== file.text.length) {
+      problems.push(`${file.path}: header plus hunks do not rebuild the file section`);
     }
     if (added !== file.added || deleted !== file.deleted) {
       problems.push(`${file.path}: file counts ${file.added}/${file.deleted} do not match its hunks ${added}/${deleted}`);
@@ -608,8 +616,12 @@ export function checkParse(parsed) {
 /**
  * Check a plan against the diff it came from. An empty list means every file
  * section and every hunk is in exactly one slice, the slice totals add up, every
- * slice is within the target unless one hunk forces it over, and the slices
- * rebuild each file section byte for byte.
+ * slice is within the target unless one hunk forces it over, and every record a
+ * slice carries is the diff's own record for that section.
+ *
+ * It reads the plan's file and hunk records, never their index numbers alone. A
+ * part holding a hunk of some other file lines up on index, and writing its
+ * slice would put that hunk under the wrong file header.
  */
 export function checkPlan(parsed, plan) {
   const problems = [];
@@ -620,9 +632,13 @@ export function checkPlan(parsed, plan) {
     let sliceChanged = 0;
     for (const part of slice.parts) {
       sliceChanged += part.changed;
+      if (part.file !== parsed.files[part.file.index]) {
+        problems.push(`${slice.id}: a part names file ${part.file.index}, which is not that file section of the diff`);
+        continue;
+      }
       const record = seenFiles.get(part.file.index) ?? { sections: 0, hunks: [] };
       record.sections += 1;
-      for (const hunk of part.hunks) record.hunks.push(hunk.index);
+      for (const hunk of part.hunks) record.hunks.push(hunk);
       seenFiles.set(part.file.index, record);
       if (part.changed !== part.hunks.reduce((sum, hunk) => sum + hunk.changed, 0)) {
         problems.push(`${slice.id}: ${part.file.path} reports ${part.changed} changed lines, which its hunks do not match`);
@@ -650,19 +666,22 @@ export function checkPlan(parsed, plan) {
     if (file.hunks.length === 0 && record.sections !== 1) {
       problems.push(`${file.path}: has no hunks and appears in ${record.sections} slices`);
     }
-    const ordered = [...record.hunks].sort((left, right) => left - right);
-    const wanted = file.hunks.map((hunk) => hunk.index);
-    if (ordered.length !== wanted.length || ordered.some((index, at) => index !== wanted[at])) {
-      problems.push(`${file.path}: its ${wanted.length} hunk(s) appear as [${ordered.join(", ")}] across the slices`);
+    const ordered = [...record.hunks].sort((left, right) => left.index - right.index);
+    if (ordered.length !== file.hunks.length || ordered.some((hunk, at) => hunk.index !== file.hunks[at].index)) {
+      problems.push(`${file.path}: its ${file.hunks.length} hunk(s) appear as [${ordered.map((hunk) => hunk.index).join(", ")}] across the slices`);
       continue;
     }
-    const rebuilt = file.header + ordered.map((index) => file.hunks[index].text).join("");
-    if (rebuilt !== file.text) problems.push(`${file.path}: the slice fragments do not rebuild the file section`);
+    // `checkParse` has already proved that a file's header plus its own hunks
+    // rebuild its section byte for byte, so holding the right records in the
+    // right order is all a slice needs. Rebuilding the section from the source
+    // again here would read no byte the plan holds, and would allocate a second
+    // copy of the biggest section in the diff.
+    const stranger = ordered.findIndex((hunk, at) => hunk !== file.hunks[at]);
+    if (stranger !== -1) {
+      problems.push(`${file.path}: the hunk ${ordered[stranger].index} a slice carries is not this file section's own record`);
+    }
   }
 
-  for (const [index] of seenFiles) {
-    if (index >= parsed.files.length) problems.push(`slice part points at file ${index}, which the diff does not hold`);
-  }
   return problems;
 }
 

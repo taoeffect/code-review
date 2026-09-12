@@ -1107,6 +1107,59 @@ test("diff: a copy-only section lands in exactly one slice", (check) => {
   check.eq(holders.length, 1, "slices holding the copy-only section");
 });
 
+// A plan is checked against the records it carries, not against index numbers
+// that happen to line up. Both doctored plans below would write a slice holding
+// another file's hunk under this file's header.
+test("diff: checkPlan reads the records a plan carries", (check) => {
+  const parsed = parseDiff(addedFileDiff("src/a.txt", 3) + addedFileDiff("src/b.txt", 3));
+  const honest = planSlices({ files: parsed.files, target: 800 });
+  check.none(checkParse(parsed), "checkParse");
+  check.none(checkPlan(parsed, honest), "checkPlan on the real plan");
+
+  const foreignHunk = planSlices({ files: parsed.files, target: 800 });
+  foreignHunk.slices[0].parts[0].hunks = [parsed.files[1].hunks[0]];
+  check.has(
+    checkPlan(parsed, foreignHunk).join(" | "),
+    "src/a.txt: the hunk 0 a slice carries is not this file section's own record",
+    "a hunk of another file is reported",
+  );
+
+  const foreignFile = planSlices({ files: parsed.files, target: 800 });
+  foreignFile.slices[0].parts[0].file = { ...parsed.files[0] };
+  check.has(
+    checkPlan(parsed, foreignFile).join(" | "),
+    "slice-01: a part names file 0, which is not that file section of the diff",
+    "a copied file record is reported",
+  );
+
+  const twoHunks = parseDiff(insertHunksDiff("src/m.txt", 2, 1));
+  const duplicated = planSlices({ files: twoHunks.files, target: 800 });
+  duplicated.slices[0].parts[0].hunks = [twoHunks.files[0].hunks[0], twoHunks.files[0].hunks[0]];
+  check.has(
+    checkPlan(twoHunks, duplicated).join(" | "),
+    "src/m.txt: its 2 hunk(s) appear as [0, 0] across the slices",
+    "one hunk twice in place of two is reported",
+  );
+});
+
+test("diff: checkParse reports a section its records do not rebuild", (check) => {
+  const shifted = parseDiff(addedFileDiff("src/a.txt", 3));
+  shifted.files[0].hunks[0].text = shifted.files[0].hunks[0].text.slice(1);
+  check.has(
+    checkParse(shifted).join(" | "),
+    "src/a.txt: header plus hunks do not rebuild the file section",
+    "a hunk that no longer sits at its offset is reported",
+  );
+
+  const short = parseDiff(insertHunksDiff("src/m.txt", 2, 1));
+  short.files[0].hunks.pop();
+  check.has(
+    checkParse(short).join(" | "),
+    "src/m.txt: header plus hunks do not rebuild the file section",
+    "hunks that stop before the end of the section are reported",
+  );
+});
+
 // ---------------------------------------------------------------------------
 // prep cases
 // ---------------------------------------------------------------------------
