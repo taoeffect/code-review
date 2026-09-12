@@ -247,6 +247,22 @@ function failedRun(check, result, code, label) {
 }
 
 /**
+ * Where a run folder sits: directly in `runRoot`, and a real folder on disk.
+ *
+ * Never rebuild the expected path from the answer, as
+ * `join(runRoot, basename(runDir))` does. The name is a timestamp and six
+ * random bytes, so it is the one part a case cannot predict, but feeding it
+ * back leaves the check reading as if it proved the whole path. It also made
+ * a wrong answer arrive as a crash: with `realpathSync` around the rebuilt
+ * path, a `runDir` one folder deeper raised `ENOENT` and the case threw,
+ * which took the twenty later checks of `prep: a normal branch` with it.
+ */
+function checkRunPlace(check, runDir, runRoot, label) {
+  check.eq(dirname(runDir), runRoot, `${label}: the run folder sits directly in the run root`);
+  check.ok(existsSync(runDir) && lstatSync(runDir).isDirectory(), `${label}: ${runDir} is not a folder on disk`);
+}
+
+/**
  * The local config every fixture needs. `GIT_ENV` takes the global and system
  * config away, so an identity has to be set here or no commit can be made. It
  * is a separate helper because `git clone` copies none of this from its origin.
@@ -1638,7 +1654,7 @@ test("prep: a normal branch", (check) => {
   check.eq(out.headSha, gitOut(dir, ["rev-parse", "HEAD"]), "headSha");
   check.eq(out.headBranch, "feature", "headBranch");
   check.eq(out.baseBehindTrackingRef, null, "no tracking ref");
-  check.eq(out.runDir, realpathSync(join(dir, RUN_ROOT, basename(out.runDir))), "runDir sits in the run root");
+  checkRunPlace(check, out.runDir, realpathSync(join(dir, RUN_ROOT)), "prep");
   check.eq(out.diffFile, join(out.runDir, "full.diff"), "diffFile");
   check.eq(out.sourceDir, join(out.runDir, "source"), "sourceDir");
   check.eq(out.totalChanged, 40, "totalChanged");
@@ -2815,7 +2831,7 @@ test("clean: a repository reached through a symlink", (check) => {
   if (!prepped) return;
   // `git rev-parse --show-toplevel` resolves the link, so prep reports the real
   // path even when it was started through the link.
-  check.eq(prepped.runDir, join(real, RUN_ROOT, basename(prepped.runDir)), "runDir is the real path");
+  checkRunPlace(check, prepped.runDir, join(real, RUN_ROOT), "prep through the symlink");
 
   const throughLink = join(view, RUN_ROOT, basename(prepped.runDir));
   const out = jsonOut(check, review(view, ["clean", "--run-dir", throughLink]), "clean through the symlink");
@@ -2899,7 +2915,7 @@ test("end to end: a linked worktree shares the main checkout's run root", (check
 
   const prepped = jsonOut(check, review(linked, ["prep"]), "prep from the linked worktree");
   if (!prepped) return;
-  check.eq(prepped.runDir, join(shared, basename(prepped.runDir)), "the run folder sits in the shared git folder");
+  checkRunPlace(check, prepped.runDir, shared, "prep from the linked worktree");
   check.eq(prepped.headBranch, "feature", "headBranch");
   check.eq(prepped.totalChanged, 40, "totalChanged");
   check.eq(gitOut(main, ["symbolic-ref", "--short", "HEAD"]), "master", "the main checkout is still on master");
