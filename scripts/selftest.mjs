@@ -20,10 +20,12 @@ import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   realpathSync,
   rmSync,
   statSync,
@@ -333,6 +335,58 @@ function zooRepo(name) {
   put(dir, "src/added.txt", lines("fresh feature line", 6));
   commitAll(dir, "every record type");
   return dir;
+}
+
+/**
+ * Everything git can do to content on its way out of the object store: CRLF
+ * endings from a `text eol=crlf` attribute, a UTF-16 working tree from
+ * `working-tree-encoding`, a smudge filter that replaces the body and leaves a
+ * witness file behind, and a second filter marked `required` whose command does
+ * not exist. It also holds an executable file and a symlink, because both are
+ * part of a snapshot the reviewer has to trust.
+ *
+ * `git checkout-index` applies every one of those. The stored bytes are what
+ * `git diff` compares, so the snapshot must hold the stored bytes.
+ */
+function conversionRepo(name, witness) {
+  const dir = newRepo(name);
+  gitAt(dir, ["config", "filter.witness.clean", "cat"]);
+  gitAt(dir, ["config", "filter.witness.smudge", `sh -c 'printf ran > ${witness}; printf REPLACED'`]);
+  gitAt(dir, ["config", "filter.absent.clean", "cat"]);
+  gitAt(dir, ["config", "filter.absent.smudge", "code-review-selftest-no-such-command"]);
+  gitAt(dir, ["config", "filter.absent.required", "true"]);
+  put(
+    dir,
+    ".gitattributes",
+    "*.crlf text eol=crlf\n*.u16 working-tree-encoding=UTF-16LE\n*.smudged filter=witness\n*.strict filter=absent\n",
+  );
+  put(dir, "src/win.crlf", "one\r\ntwo\r\n");
+  put(dir, "src/wide.u16", Buffer.from("hello\nwide\n", "utf16le"));
+  put(dir, "src/body.smudged", "stored body\n");
+  put(dir, "src/keep.strict", "strict body\n");
+  put(dir, "src/run.sh", "#!/bin/sh\necho base\n");
+  chmodSync(join(dir, "src/run.sh"), 0o755);
+  symlinkSync("run.sh", join(dir, "src/link"));
+  commitAll(dir, "base commit");
+
+  gitAt(dir, ["checkout", "-q", "-b", "feature"]);
+  put(dir, "src/win.crlf", "one\r\nTWO\r\n");
+  put(dir, "src/body.smudged", "stored body\nand more\n");
+  commitAll(dir, "feature work");
+  return dir;
+}
+
+/** `[{ mode, type, oid, path }]` for every entry of a tree, paths included. */
+function treeEntries(dir, tree) {
+  const listing = gitAt(dir, ["ls-tree", "-r", "-z", "--full-tree", tree]).stdout;
+  return listing
+    .split("\0")
+    .filter((record) => record.length > 0)
+    .map((record) => {
+      const [meta, path] = record.split("\t");
+      const [mode, type, oid] = meta.split(" ");
+      return { mode, type, oid, path };
+    });
 }
 
 /** "caf<0xE9> latin1": a Latin-1 or CP1252 source line git still calls text. */
@@ -922,7 +976,47 @@ test("prep: a normal branch", (check) => {
     }
   }
   check.eq(existsSync(join(out.sourceDir, "untracked.txt")), false, "an untracked file is not in the snapshot");
-  check.deep(readdirSync(scratch), [], "no temporary index folder left behind");
+  check.deep(readdirSync(scratch), [], "no temporary files left behind");
+});
+
+test("prep: the source snapshot holds the stored bytes", (check) => {
+  const witness = join(WORK, "smudge-witness");
+  const dir = conversionRepo("prep-conversion", witness);
+
+  const before = snapshot(dir);
+  const out = jsonOut(check, review(dir, ["prep"]), "prep");
+  unchanged(check, before, snapshot(dir), "prep");
+  if (!out) return;
+
+  const tree = gitOut(dir, ["merge-tree", "--write-tree", out.baseSha, out.headSha]);
+  const entries = treeEntries(dir, tree);
+  check.eq(entries.length, walkFiles(out.sourceDir).length, "snapshot file count");
+  for (const entry of entries) {
+    const full = join(out.sourceDir, entry.path);
+    const stored = gitAt(dir, ["cat-file", "blob", entry.oid], { encoding: "latin1" }).stdout;
+    if (entry.mode === "120000") {
+      check.ok(lstatSync(full).isSymbolicLink(), `${entry.path} is a symlink`);
+      check.eq(readlinkSync(full), stored, `${entry.path} symlink target`);
+      continue;
+    }
+    check.eq(readFileSync(full, "latin1"), stored, `${entry.path} holds the stored bytes`);
+    const executable = (lstatSync(full).mode & 0o111) !== 0;
+    check.eq(executable, entry.mode === "100755", `${entry.path} executable bit`);
+  }
+
+  // The three conversions, named one by one, so a failure says which one ran.
+  check.eq(readFileSync(join(out.sourceDir, "src/win.crlf"), "latin1"), "one\nTWO\n", "eol=crlf did not convert");
+  check.eq(
+    readFileSync(join(out.sourceDir, "src/wide.u16"), "latin1"),
+    "hello\nwide\n",
+    "working-tree-encoding did not convert",
+  );
+  check.eq(
+    readFileSync(join(out.sourceDir, "src/body.smudged"), "utf8"),
+    "stored body\nand more\n",
+    "the smudge filter did not replace the body",
+  );
+  check.eq(existsSync(witness), false, "no smudge filter command ran");
 });
 
 test("prep: a dirty working directory stops the run", (check) => {
@@ -1216,13 +1310,18 @@ test("prep: a stale marked run goes, a neighbour stays", (check) => {
 
 test("prep: a failure after the run folder exists removes it", (check) => {
   const dir = simpleRepo("prep-partial");
+  // Both branches hold this blob unchanged, so the diff never reads it and
+  // only the source snapshot trips over it: a failure after the run folder is
+  // already on disk.
+  const oid = gitOut(dir, ["rev-parse", "HEAD:README.md"]);
+  rmSync(join(dir, ".git", "objects", oid.slice(0, 2), oid.slice(2)), { force: true });
+
   const before = snapshot(dir);
-  // `materializeTree` makes its temporary index under TMPDIR, so an unusable
-  // TMPDIR fails the run after the run folder is already on disk.
-  const result = review(dir, ["prep"], { TMPDIR: join(WORK, "no-such-tmpdir") });
+  const result = review(dir, ["prep"]);
   unchanged(check, before, snapshot(dir), "prep");
   check.eq(result.code, 1, `exit code (stderr: ${clip(result.stderr)})`);
   check.eq(result.stdout, "", "stdout must stay empty");
+  check.has(result.stderr, "README.md", "the failure names the object it could not read");
   const runRoot = join(dir, RUN_ROOT);
   const left = existsSync(runRoot) ? readdirSync(runRoot) : [];
   check.deep(left, [], "the partial run folder was removed");

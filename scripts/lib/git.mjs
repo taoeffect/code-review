@@ -1,13 +1,12 @@
 // Every git call the code-review CLI makes lives here.
 //
 // Nothing in this file may write to HEAD, the real index, or the working tree.
-// The one write is `materializeTree`, which uses its own throwaway index outside
-// the repository and extracts files into a folder the caller owns.
+// The one write is `materializeTree`, which only creates files under the folder
+// the caller owns.
 
 import { spawnSync } from "node:child_process";
-import { closeSync, mkdirSync, mkdtempSync, openSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { chmodSync, closeSync, mkdirSync, openSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 /** Big enough for a whole diff of a very large branch. */
 const MAX_BUFFER = 256 * 1024 * 1024;
@@ -84,19 +83,22 @@ export class GitError extends Error {
  * because several callers treat a non-zero exit as a normal answer.
  *
  * `opts.stdoutFd` sends stdout straight to a file descriptor, so a huge diff
- * never becomes a JavaScript string.
+ * never becomes a JavaScript string. `opts.encoding` of `latin1` keeps one
+ * character per byte and `buffer` hands back raw bytes; `stderr` is always
+ * text. `opts.input` is written to the process's stdin.
  */
 export function git(args, opts = {}) {
-  const { cwd, env, stdoutFd, maxBuffer = MAX_BUFFER } = opts;
+  const { cwd, env, stdoutFd, input, encoding = "utf8", maxBuffer = MAX_BUFFER } = opts;
   const result = spawnSync("git", args, {
     cwd,
     // GIT_OPTIONAL_LOCKS=0 stops `git status` from refreshing the real index,
     // which would rewrite the index file on disk.
     env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", ...env },
-    encoding: "utf8",
+    encoding,
+    input,
     maxBuffer,
     shell: false,
-    stdio: ["ignore", stdoutFd === undefined ? "pipe" : stdoutFd, "pipe"],
+    stdio: [input === undefined ? "ignore" : "pipe", stdoutFd === undefined ? "pipe" : stdoutFd, "pipe"],
   });
   if (result.error) {
     throw new GitError(`could not run git ${args.join(" ")}: ${result.error.message}`, "GIT_SPAWN_FAILED");
@@ -106,7 +108,17 @@ export function git(args, opts = {}) {
   if (result.signal) {
     throw new GitError(`git ${args.join(" ")} was killed by ${result.signal}`, "GIT_KILLED");
   }
-  return { code: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+  return {
+    code: result.status ?? 1,
+    stdout: result.stdout ?? (encoding === "buffer" ? Buffer.alloc(0) : ""),
+    stderr: asText(result.stderr),
+  };
+}
+
+/** `stderr` stays a string even when stdout is asked for as raw bytes. */
+function asText(value) {
+  if (typeof value === "string") return value;
+  return value === null || value === undefined ? "" : value.toString("utf8");
 }
 
 /** Run git where a non-zero exit is a real fault. */
@@ -262,26 +274,156 @@ export function mergeTree(baseSha, headSha, opts = {}) {
   throw new GitError(`git merge-tree exited with ${result.code}: ${detail}`, "MERGE_TREE_FAILED");
 }
 
+const SYMLINK_MODE = "120000";
+const EXEC_MODE = "100755";
+/** How many blob bytes one `cat-file --batch` call is allowed to hold. */
+const BLOB_BATCH_BYTES = 64 * 1024 * 1024;
+
 /**
  * Write the files of `tree` into `outDir`, so agents can read the merged source
- * the diff describes. A temporary index outside the repository keeps the real
- * index untouched.
+ * the diff describes.
+ *
+ * The snapshot must hold the stored bytes, because `git diff` compares stored
+ * blobs. `git checkout-index` cannot promise that: it writes through git's
+ * working-tree conversion, so `core.autocrlf`, `core.eol`, the `text`, `eol`,
+ * and `working-tree-encoding` attributes, and any smudge filter all change the
+ * content. A smudge filter is worse than a mismatch: an LFS driver would fetch
+ * over the network, and a filter marked `required` whose command is missing
+ * would fail the whole run. `ls-tree` plus `cat-file --batch` reads the objects
+ * as they are stored, with no `--filters` and no `--textconv`.
  */
 export function materializeTree({ tree, outDir }, opts = {}) {
   const target = resolve(outDir);
   mkdirSync(target, { recursive: true });
-  const indexDir = mkdtempSync(join(tmpdir(), "code-review-index-"));
-  const env = { ...opts.env, GIT_INDEX_FILE: join(indexDir, "index") };
-  try {
-    gitOrThrow(["read-tree", tree], { ...opts, env });
-    // The trailing separator is what makes --prefix a folder rather than a
-    // filename prefix.
-    gitOrThrow(["checkout-index", "--all", "--force", `--prefix=${target}${sep}`], { ...opts, env });
-  } finally {
-    rmSync(indexDir, { recursive: true, force: true });
+  const made = new Set();
+  const blobs = [];
+  for (const entry of treeEntries(tree, opts)) {
+    // A submodule keeps its path as an empty folder: this tree holds none of
+    // its content, so there is nothing to write.
+    if (entry.type === "commit") mkdirSync(fullPath(target, entry.path), { recursive: true });
+    else blobs.push(entry);
+  }
+  for (const batch of blobBatches(blobs)) {
+    const contents = readBlobs(batch, opts);
+    for (let at = 0; at < batch.length; at += 1) writeEntry(target, batch[at], contents[at], made);
   }
   return target;
 }
+
+// `ls-tree -r -z --long` writes "<mode> <type> <oid> <size>\t<path>" per entry,
+// NUL-separated. `-z` hands the path over as raw bytes, so no quoting and no
+// `core.quotepath` setting can change the shape. `--long` carries the blob
+// size, which is what lets the reader bound how much it holds at once.
+// `--full-tree` ignores the current folder, so the whole tree is extracted even
+// when the caller sits in a subdirectory.
+function treeEntries(tree, opts) {
+  const listing = gitOrThrow(["ls-tree", "-r", "-z", "--long", "--full-tree", tree], {
+    ...opts,
+    encoding: "latin1",
+  }).stdout;
+  const entries = [];
+  for (const record of listing.split("\0")) {
+    if (record.length === 0) continue;
+    const tab = record.indexOf("\t");
+    const fields = tab === -1 ? [] : record.slice(0, tab).split(/ +/);
+    if (fields.length !== 4) {
+      throw new GitError(`could not read the tree entry: ${record}`, "LS_TREE_UNREADABLE");
+    }
+    const [mode, type, oid, sizeField] = fields;
+    const path = record.slice(tab + 1);
+    // Git never writes such a path into a tree. A hand-made tree must not be
+    // able to place a file outside the folder the caller owns.
+    if (path.startsWith("/") || /(^|\/)\.\.(\/|$)/.test(path)) {
+      throw new GitError(`tree entry leaves the snapshot folder: ${path}`, "LS_TREE_PATH");
+    }
+    // git writes `BAD` in the size field of an object it cannot read, and
+    // still exits 0.
+    const size = type === "blob" ? Number(sizeField) : 0;
+    if (!Number.isInteger(size) || size < 0) {
+      throw new GitError(`could not read the size of ${path}: ${record}`, "LS_TREE_UNREADABLE");
+    }
+    entries.push({ mode, type, oid, size, path });
+  }
+  return entries;
+}
+
+// One `cat-file --batch` call per bounded group, so a tree of a large
+// repository never becomes one huge allocation.
+function* blobBatches(entries) {
+  let batch = [];
+  let bytes = 0;
+  for (const entry of entries) {
+    if (batch.length > 0 && bytes + entry.size > BLOB_BATCH_BYTES) {
+      yield batch;
+      batch = [];
+      bytes = 0;
+    }
+    batch.push(entry);
+    bytes += entry.size;
+  }
+  if (batch.length > 0) yield batch;
+}
+
+// `--batch` answers every id on stdin with "<oid> <type> <size>" on one line,
+// then that many bytes, then a newline.
+function readBlobs(batch, opts) {
+  const headroom = batch.length * 128 + 1024;
+  const wanted = batch.reduce((sum, entry) => sum + entry.size, 0) + headroom;
+  const result = git(["cat-file", "--batch"], {
+    ...opts,
+    encoding: "buffer",
+    // `spawnSync` decodes a string `input` with `encoding`, and "buffer" is
+    // not a decodable name, so the ids go in as bytes.
+    input: Buffer.from(`${batch.map((entry) => entry.oid).join("\n")}\n`),
+    maxBuffer: wanted,
+  });
+  if (result.code !== 0) {
+    const detail = result.stderr.trim() || "no error output";
+    throw new GitError(`git cat-file --batch exited with ${result.code}: ${detail}`, "CAT_FILE_FAILED");
+  }
+  const bytes = result.stdout;
+  const contents = [];
+  let at = 0;
+  for (const entry of batch) {
+    const lineEnd = bytes.indexOf(0x0a, at);
+    const header = lineEnd === -1 ? "" : bytes.toString("utf8", at, lineEnd);
+    const size = Number(header.split(" ")[2]);
+    // An object git cannot read answers "<oid> missing" and still exits 0.
+    if (!Number.isInteger(size) || lineEnd + 1 + size > bytes.length) {
+      throw new GitError(
+        `git cat-file --batch could not read object ${entry.oid}: ${header || "no header"}`,
+        "CAT_FILE_UNREADABLE",
+      );
+    }
+    contents.push(bytes.subarray(lineEnd + 1, lineEnd + 1 + size));
+    at = lineEnd + 1 + size + 1;
+  }
+  return contents;
+}
+
+function writeEntry(target, entry, content, made) {
+  const at = entry.path.lastIndexOf("/");
+  if (at !== -1) {
+    const dir = entry.path.slice(0, at);
+    if (!made.has(dir)) {
+      mkdirSync(fullPath(target, dir), { recursive: true });
+      made.add(dir);
+    }
+  }
+  const path = fullPath(target, entry.path);
+  if (entry.mode === SYMLINK_MODE) {
+    symlinkSync(content, path);
+    return;
+  }
+  writeFileSync(path, content);
+  // The executable bit is the only permission a tree carries, and the umask
+  // must not be the one that decides it.
+  chmodSync(path, entry.mode === EXEC_MODE ? 0o755 : 0o644);
+}
+
+// A tree path is a byte string that is not always valid UTF-8, so the exact
+// bytes only survive as a Buffer path.
+const fullPath = (target, path) => Buffer.concat([Buffer.from(`${target}/`), Buffer.from(path, "latin1")]);
 
 /** Write `git diff <from> <to>` to a file without holding it in memory. */
 export function diffToFile({ from, to, outPath, excludes = DEFAULT_EXCLUDES, context = 10 }, opts = {}) {
