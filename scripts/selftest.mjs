@@ -1278,6 +1278,22 @@ test("diff: one oversized hunk keeps its own slice", (check) => {
   check.eq(plan.slices[0].parts.length, 1, "the oversized hunk sits alone");
   check.eq(plan.slices[1].oversized, false, "slice 2 oversized");
   check.eq(plan.slices[1].changed, 50, "slice 2 changed lines");
+
+  // `oversized` exempts a slice from the target, so the exemption has to be
+  // earned by the one hunk that forces it. This is the packing change the
+  // guard is for: the small file joins the oversized slice, which is then 250
+  // lines over the target. Before the guard `checkPlan` reported nothing.
+  const packedTogether = planSlices({ files: parsed.files, target: 800 });
+  const [oversized, rest] = packedTogether.slices;
+  oversized.parts.push(...rest.parts);
+  oversized.changed += rest.changed;
+  packedTogether.slices = [oversized];
+  packedTogether.sliceCount = 1;
+  check.has(
+    checkPlan(parsed, packedTogether).join(" | "),
+    "slice-01: is exempt from the target of 800 as oversized, yet it holds 2 hunks and not the one that forces it",
+    "a second hunk in an oversized slice is reported",
+  );
 });
 
 test("diff: a target of 1 still passes, a target of 0 throws", (check) => {

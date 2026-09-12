@@ -672,8 +672,9 @@ export function checkParse(parsed) {
 /**
  * Check a plan against the diff it came from. An empty list means every file
  * section and every hunk is in exactly one slice, the slice totals add up, every
- * slice is within the target unless one hunk forces it over, and every record a
- * slice carries is the diff's own record for that section.
+ * slice is within the target unless one hunk on its own forces it over and that
+ * hunk is all the slice holds, and every record a slice carries is the diff's
+ * own record for that section.
  *
  * It reads the plan's file and hunk records, never their index numbers alone. A
  * part holding a hunk of some other file lines up on index, and writing its
@@ -705,6 +706,16 @@ export function checkPlan(parsed, plan) {
     }
     if (slice.changed > plan.target && !slice.oversized) {
       problems.push(`${slice.id}: holds ${slice.changed} changed lines, over the target of ${plan.target}, yet no single hunk forces it`);
+    }
+    // The test above is switched off entirely by the flag, so the flag itself
+    // has to be pinned: oversized means one hunk on its own beats the target,
+    // and the packer gives such a hunk a slice to itself. A second hunk beside
+    // it would be a slice far over the target with nothing left to report it.
+    if (slice.oversized) {
+      const hunks = slice.parts.reduce((sum, part) => sum + part.hunks.length, 0);
+      if (hunks !== 1) {
+        problems.push(`${slice.id}: is exempt from the target of ${plan.target} as oversized, yet it holds ${hunks} hunks and not the one that forces it`);
+      }
     }
     planned += sliceChanged;
   }
