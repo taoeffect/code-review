@@ -374,6 +374,11 @@ export function sliceText(slice) {
  * oversized. Every other slice stays within the target, so the slice count can
  * be more than `ceil(total / target)` when the work does not pack neatly.
  *
+ * A file section of no changed lines is worth nothing to that sum, so those are
+ * spread by count instead, one per slice in turn. Otherwise every binary,
+ * mode-only, rename-only, and copy-only change in the branch would land in the
+ * one slice the changed-line sum keeps calling emptiest.
+ *
  * Returns `{ target, total, sliceCount, oversized, slices, batches }`, where a
  * slice is `{ id, index, path, changed, oversized, parts }` and a part is
  * `{ file, hunks, changed, partial }`. `parts` and `hunks` hold the parsed
@@ -388,31 +393,48 @@ export function planSlices({ files, target = DEFAULT_TARGET }) {
   units.sort(byWorkThenPlace);
   const bins = [];
   const openBin = (unit) => {
-    bins.push({ units: [unit], changed: unit.changed, folders: new Set([unit.folder]) });
+    bins.push({
+      units: [unit],
+      changed: unit.changed,
+      zeros: unit.changed === 0 ? 1 : 0,
+      folders: new Set([unit.folder]),
+    });
   };
   for (const unit of units) {
     if (unit.oversized) {
       openBin(unit);
       continue;
     }
-    // The emptiest slice that still has room for the whole unit. Two equally
-    // empty slices are separated by folder: one that already holds the unit's
-    // folder wins, so related files reach one reviewer. Balance still comes
-    // first, because a fuller slice never wins on folder alone.
+    // A unit of no changed lines — binary, mode-only, rename-only, copy-only —
+    // fits every slice and raises no total, so on changed lines alone the
+    // emptiest slice would win it and every later one with it, and one reviewer
+    // would get every path-level and mode-level change in the branch. Those
+    // units are ranked by how many of themselves a slice already holds, which
+    // spreads them evenly. `byWorkThenPlace` puts them last, so every slice a
+    // changed line can reach already exists by the time the first one is placed.
+    const spread = unit.changed === 0;
+    // The least loaded slice that still has room for the whole unit. Two equally
+    // loaded slices are separated by folder: one that already holds the unit's
+    // folder wins, so related files reach one reviewer. Load still comes first,
+    // because a fuller slice never wins on folder alone.
     let roomy = null;
+    let roomyLoad = 0;
     let roomyShares = false;
     for (const bin of bins) {
       if (bin.changed + unit.changed > target) continue;
-      if (roomy !== null && bin.changed > roomy.changed) continue;
+      const load = spread ? bin.zeros : bin.changed;
+      if (roomy !== null && load > roomyLoad) continue;
       const shares = bin.folders.has(unit.folder);
-      if (roomy === null || bin.changed < roomy.changed || (shares && !roomyShares)) {
+      if (roomy === null || load < roomyLoad || (shares && !roomyShares)) {
         roomy = bin;
+        roomyLoad = load;
         roomyShares = shares;
       }
     }
     if (roomy) {
       roomy.units.push(unit);
       roomy.changed += unit.changed;
+      if (spread) roomy.zeros += 1;
       roomy.folders.add(unit.folder);
     } else {
       // Nothing has room, so open a slice rather than push one over the target.

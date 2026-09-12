@@ -555,6 +555,15 @@ function addedFileDiff(path, count, prefix = "line") {
   );
 }
 
+/** A binary file change: no hunks, so no changed lines at all. */
+function binaryFileDiff(path) {
+  return (
+    `diff --git a/${path} b/${path}\n` +
+    "index 1111111..2222222 100644\n" +
+    `Binary files a/${path} and b/${path} differ\n`
+  );
+}
+
 /** A modified file of `hunks` insert-only hunks, each adding `perHunk` lines. */
 function insertHunksDiff(path, hunks, perHunk) {
   let text =
@@ -1081,6 +1090,39 @@ test("diff: equally empty slices are broken by folder, and balance still wins", 
     "the emptier slice beats the one sharing the folder",
   );
   check.deep(unevenPlan.slices.map((slice) => slice.changed), [700, 600], "balance is kept");
+});
+
+test("diff: zero-line sections spread across slices, and count beats folder", (check) => {
+  let text = addedFileDiff("src/a.txt", 800) + addedFileDiff("src/b.txt", 600) + addedFileDiff("src/c.txt", 800);
+  for (let n = 1; n <= 8; n += 1) text += binaryFileDiff(`assets/img-${n}.dat`);
+  const spread = parseDiff(text);
+  const spreadPlan = planSlices({ files: spread.files, target: 1000 });
+  check.none(checkParse(spread), "checkParse");
+  check.none(checkPlan(spread, spreadPlan), "checkPlan");
+  check.deep(
+    spreadPlan.slices.map((slice) => slice.parts.length),
+    [4, 3, 4],
+    "the eight binary sections are shared out, not piled into the emptiest slice",
+  );
+  check.deep(spreadPlan.slices.map((slice) => slice.changed), [800, 600, 800], "changed lines are untouched");
+
+  // Same rule as for changed lines: load first, folder only on a tie. The first
+  // zero unit joins the slice sharing its folder, the second has to go to a
+  // slice holding no zero unit yet.
+  const tie = parseDiff(
+    addedFileDiff("a/big.txt", 600) +
+      addedFileDiff("b/big.txt", 600) +
+      addedFileDiff("c/big.txt", 600) +
+      binaryFileDiff("c/one.bin") +
+      binaryFileDiff("c/two.bin"),
+  );
+  const tiePlan = planSlices({ files: tie.files, target: 1000 });
+  check.none(checkPlan(tie, tiePlan), "checkPlan on the tie fixture");
+  check.deep(
+    tiePlan.slices.map((slice) => slice.parts.map((part) => part.file.path)),
+    [["a/big.txt", "c/two.bin"], ["b/big.txt"], ["c/big.txt", "c/one.bin"]],
+    "folder settles the first, an empty slice takes the second",
+  );
 });
 
 test("diff: seven files at target 100 give seven slices in three batches", (check) => {
