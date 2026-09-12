@@ -78,6 +78,17 @@ export const DIFF_CONFIG = [
 // delete plus a full add in the patch while `numstat` still reports two
 // changed lines, and `copies` turns a copy into a zero-line record in the
 // patch while the counts call it a whole new file.
+//
+// Copies are deliberately not detected, so no diff this tool prepares holds a
+// `copy from` line and a copied file is reviewed as the new file it is. Plain
+// `--find-copies` only finds a copy whose source changed in the same branch,
+// and it then writes the delta against the *base* version of that source,
+// which is not the version the merged snapshot holds. Finding the copies worth
+// naming needs `--find-copies-harder`, which inspects every unmodified file as
+// a candidate source; git's manual calls that very expensive for large
+// projects, and a large diff is the only input this tool exists for. The copy
+// branches in the parsers below and in `scripts/lib/diff.mjs` are there to
+// read a record we never ask for, not to describe something a run produces.
 export const DIFF_FLAGS = ["--no-color", "--no-ext-diff", "--no-textconv", "--find-renames"];
 
 export class GitError extends Error {
@@ -554,7 +565,8 @@ function parseNumstatZ(text) {
     }
     const addedText = head.slice(0, firstTab);
     const deletedText = head.slice(firstTab + 1, secondTab);
-    // A rename or a copy head is exactly "0 TAB 0 TAB", so the path is empty
+    // A rename or a copy leaves the path field empty whatever its counts are,
+    // "0 TAB 0 TAB" for a pure one and "1 TAB 1 TAB" for one carrying an edit,
     // and the two sides are the fields after it.
     let path = head.slice(secondTab + 1);
     let oldPath = null;
@@ -575,7 +587,10 @@ function parseNumstatZ(text) {
 }
 
 // `--name-status -z` writes "status NUL path NUL", and for a rename or copy
-// "R100 NUL old NUL new NUL".
+// "R100 NUL old NUL new NUL". The `C` half of that pair is defensive: our own
+// flags never ask for copy detection (see `DIFF_FLAGS`), but a `C` record read
+// as a plain one would take the source path for the record's own and then read
+// the target path as the next status, desyncing the whole stream.
 function parseNameStatusZ(text) {
   const fields = text.split("\0");
   const byPath = new Map();

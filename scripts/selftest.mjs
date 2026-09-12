@@ -459,6 +459,10 @@ function submoduleRepo(name) {
  * The added and the deleted binary are the two sections git writes with no
  * `---` and `+++` pair, so the side that does not exist can only be read back
  * out of the `diff --git` line.
+ *
+ * A copy is not on the list. The CLI never asks for copy detection, so no diff
+ * it prepares can hold one; `copyRepo` covers the record git would write if it
+ * were ever asked.
  */
 function zooRepo(name) {
   const dir = newRepo(name);
@@ -517,6 +521,33 @@ function sidePrefixRepo(name) {
   gitAt(dir, ["mv", "b/orig.txt", "b/moved.txt"]);
   put(dir, "b/copy.txt", lines("source", 6));
   commitAll(dir, "renames under a/ and b/");
+  return dir;
+}
+
+/**
+ * A copy in both shapes git writes it: `src/clone.txt` is a whole copy of
+ * `src/origin.txt`, so its section carries no hunk at all, and
+ * `src/tweaked.txt` is a copy carrying one edited line, so its delta is taken
+ * against the base version of the source.
+ *
+ * `src/origin.txt` is edited too, which is what makes plain `--find-copies`
+ * enough. `src/keep-copy.txt` is the other kind: a copy of `src/keep.txt`,
+ * which this branch leaves alone, so only the far more expensive
+ * `--find-copies-harder` finds it. Between them they are the reason the CLI
+ * asks for neither — see `DIFF_FLAGS` in `scripts/lib/git.mjs`.
+ */
+function copyRepo(name) {
+  const dir = newRepo(name);
+  put(dir, "src/origin.txt", lines("origin", 20));
+  put(dir, "src/keep.txt", lines("keep", 20));
+  commitAll(dir, "base commit");
+
+  gitAt(dir, ["checkout", "-q", "-b", "feature"]);
+  put(dir, "src/origin.txt", `${lines("origin", 4)}origin 5 edited\n${lines("origin", 15, 6)}`);
+  put(dir, "src/clone.txt", lines("origin", 20));
+  put(dir, "src/tweaked.txt", `${lines("origin", 11)}origin 12 tweaked\n${lines("origin", 8, 13)}`);
+  put(dir, "src/keep-copy.txt", lines("keep", 20));
+  commitAll(dir, "one file copied twice, another copied untouched");
   return dir;
 }
 
@@ -764,12 +795,6 @@ const BAD_COUNTS_DIFF =
   "-two\n" +
   "+TWO\n" +
   " three\n";
-
-const COPY_ONLY_DIFF =
-  "diff --git a/src/original.txt b/src/copy.txt\n" +
-  "similarity index 100%\n" +
-  "copy from src/original.txt\n" +
-  "copy to src/copy.txt\n";
 
 // ---------------------------------------------------------------------------
 // Slice helpers used by several cases
@@ -1454,18 +1479,64 @@ test("diff: a big file is cut at hunk boundaries only", (check) => {
   check.eq(described.slices[0].files[0].newLineRanges?.length, 40, "one line range per hunk");
 });
 
-test("diff: a copy-only section lands in exactly one slice", (check) => {
-  const parsed = parseDiff(COPY_ONLY_DIFF + addedFileDiff("src/other.txt", 30));
+// Copy detection is off by design, so no run can produce these records (see
+// `DIFF_FLAGS` in `scripts/lib/git.mjs`, and the hostile `diff.renames` case
+// for the proof). The parser still has to read one rather than take it for a
+// fresh file, so the input here is what git really writes, taken with a flag
+// the CLI never passes, instead of a handmade section.
+test("diff: both copy shapes git writes reach exactly one slice each", (check) => {
+  const dir = copyRepo("diff-copy");
+  const text = protectedDiff(dir, ["--find-copies", "-U10", "master", "feature"], { encoding: "latin1" });
+  check.eq((text.match(/\ncopy from src\/origin\.txt\n/g) ?? []).length, 2, "git copies one source twice");
+
+  const parsed = parseDiff(text);
   check.deep(parsed.warnings, [], "warnings");
   check.none(checkParse(parsed), "checkParse");
-  check.eq(parsed.files[0].status, "C", "copy status");
-  check.eq(parsed.files[0].oldPath, "src/original.txt", "copy source");
-  check.eq(parsed.files[0].path, "src/copy.txt", "copy target");
-  check.eq(parsed.files[0].renameOnly, true, "no hunks");
-  const plan = planSlices({ files: parsed.files, target: 10 });
+  check.eq(parsed.preamble + parsed.files.map((file) => file.text).join(""), text, "records rebuild the diff");
+
+  const byPath = new Map(parsed.files.map((file) => [file.path, file]));
+  check.deep(
+    [...byPath.keys()].sort(),
+    ["src/clone.txt", "src/keep-copy.txt", "src/origin.txt", "src/tweaked.txt"],
+    "paths",
+  );
+  const clone = byPath.get("src/clone.txt");
+  const tweaked = byPath.get("src/tweaked.txt");
+  check.eq(clone?.status, "C", "a whole copy is a copy");
+  check.eq(clone?.oldPath, "src/origin.txt", "the whole copy names its source");
+  check.eq(clone?.renameOnly, true, "the whole copy carries no hunk");
+  check.eq(clone?.changed, 0, "the whole copy changes no line");
+  check.eq(tweaked?.status, "C", "a copy carrying an edit is a copy");
+  check.eq(tweaked?.oldPath, "src/origin.txt", "the edited copy names its source");
+  check.eq(tweaked?.renameOnly, false, "the edited copy carries its delta");
+  check.eq(tweaked?.changed, 2, "the edited copy counts its delta");
+
+  // The copy a reviewer most wants named is the one taken from a file the
+  // branch did not touch, and plain copy detection is blind to it. Only
+  // `--find-copies-harder`, which reads every unmodified file as a candidate
+  // source, finds that one.
+  check.eq(byPath.get("src/keep-copy.txt")?.status, "A", "a copy of an untouched file stays an addition");
+  const harder = protectedDiff(dir, ["--find-copies-harder", "-U10", "master", "feature"], { encoding: "latin1" });
+  const harderByPath = new Map(parseDiff(harder).files.map((file) => [file.path, file]));
+  check.eq(harderByPath.get("src/keep-copy.txt")?.status, "C", "the expensive flag is the one that finds it");
+
+  // Two changed lines fill a slice at this target, so the two sections holding
+  // hunks cannot share one, the 20-line addition beats the target on its own
+  // hunk, and the copy of no changed lines is placed by count like every other
+  // zero-line record.
+  const plan = planSlices({ files: parsed.files, target: 2 });
   check.none(checkPlan(parsed, plan), "checkPlan");
-  const holders = plan.slices.filter((slice) => slice.parts.some((part) => part.file.path === "src/copy.txt"));
-  check.eq(holders.length, 1, "slices holding the copy-only section");
+  check.eq(plan.sliceCount, 3, "slice count");
+
+  const places = new Map();
+  for (const slice of describePlan(plan).slices) {
+    for (const file of slice.files) places.set(file.path, [...(places.get(file.path) ?? []), file]);
+  }
+  check.deep([...places.keys()].sort(), [...byPath.keys()].sort(), "every section is placed");
+  for (const [path, entries] of places) check.eq(entries.length, 1, `${path} lands in exactly one slice`);
+  check.eq(places.get("src/clone.txt")?.[0].oldPath, "src/origin.txt", "the manifest names the copy source");
+  check.eq(places.get("src/tweaked.txt")?.[0].oldPath, "src/origin.txt", "the manifest names the edited copy's source");
+  check.eq(places.get("src/origin.txt")?.[0].oldPath, null, "a modified file has no old path");
 });
 
 // The rename and copy header lines are the one place in a diff that carries no
@@ -1963,6 +2034,10 @@ test("prep: hostile diff config cannot change the diff shape", (check) => {
 // patch alone turns a copied file into a zero-line record. Either way the
 // reported total would describe trees `full.diff` does not hold, and the skill
 // picks the review path from that total.
+//
+// The copied file is also the policy pin: this tool never detects a copy, so
+// even a repository asking for `copies` gets the whole new file in the diff
+// and a plain addition in the counts.
 test("prep: a hostile diff.renames cannot change what the counts describe", (check) => {
   const dir = newRepo("prep-renames");
   put(dir, "src/moved.txt", lines("keep", 200));
@@ -1971,8 +2046,9 @@ test("prep: a hostile diff.renames cannot change what the counts describe", (che
   gitAt(dir, ["checkout", "-q", "-b", "feature"]);
   gitAt(dir, ["mv", "src/moved.txt", "src/landed.txt"]);
   put(dir, "src/landed.txt", `${lines("keep", 199)}keep 200 edited\n`);
-  // A copy of one file plus an edit to its original: the record `copies` turns
-  // into a zero-line copy while `--find-renames` keeps it a whole new file.
+  // A copy of one file plus an edit to its original, which is the one shape
+  // plain copy detection would find. `copies` turns it into a zero-line copy
+  // record; `--find-renames` keeps it a whole new file.
   put(dir, "src/clone.txt", lines("origin", 200));
   put(dir, "src/origin.txt", `${lines("origin", 199)}origin 200 edited\n`);
   commitAll(dir, "move, copy, and edit");
@@ -1987,7 +2063,8 @@ test("prep: a hostile diff.renames cannot change what the counts describe", (che
     unchanged(check, before, snapshot(dir), `prep diff.renames=${setting}`);
     if (!out) continue;
 
-    const parsed = parseDiff(readDiff(out.diffFile));
+    const text = readDiff(out.diffFile);
+    const parsed = parseDiff(text);
     check.none(checkParse(parsed), `full.diff checkParse at diff.renames=${setting}`);
     check.eq(
       out.totalChanged,
@@ -2003,6 +2080,12 @@ test("prep: a hostile diff.renames cannot change what the counts describe", (che
     check.eq(landed?.status, "R", `the rename survives diff.renames=${setting}`);
     check.eq(landed?.oldPath, "src/moved.txt", `the old path at diff.renames=${setting}`);
     check.eq(landed?.changed, 2, `the rename counts two changed lines at diff.renames=${setting}`);
+
+    const clone = out.files.find((file) => file.path === "src/clone.txt");
+    check.eq(clone?.status, "A", `the copy is a plain addition at diff.renames=${setting}`);
+    check.eq(clone?.oldPath, null, `the addition names no source at diff.renames=${setting}`);
+    check.eq(clone?.changed, 200, `the addition counts its whole content at diff.renames=${setting}`);
+    check.hasNot(text, "\ncopy from ", `full.diff holds no copy record at diff.renames=${setting}`);
   }
 });
 
