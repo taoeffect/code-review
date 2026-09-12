@@ -110,13 +110,12 @@ Commands:
       --all                Remove every run folder left in the run root.
 
 Exit codes:
-  0  ready
-  1  failed
-  2  the working directory has staged or unstaged changes
-  3  merging the base branch conflicts
-  4  the base ref is missing or names no commit
-  5  git is older than 2.38
-  6  a self-check failed
+  Every command:  0 success, 1 failure.
+  prep only:      2 the working directory has staged or unstaged changes
+                  3 merging the base branch conflicts
+                  4 the base ref is missing or names no commit
+                  5 git is older than 2.38
+  split only:     6 a self-check failed
 `;
 }
 
