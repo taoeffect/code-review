@@ -1626,6 +1626,13 @@ test("prep: usage faults", (check) => {
 
   const faults = [
     [["bogus"], 'unknown command "bogus"'],
+    // A command name that `Object.prototype` answers. Each of these four
+    // reached a different crash: a returned object, a returned string, a
+    // returned non-function, and a throw inside the inherited call.
+    [["constructor"], 'unknown command "constructor"'],
+    [["toString"], 'unknown command "toString"'],
+    [["__proto__"], 'unknown command "__proto__"'],
+    [["hasOwnProperty"], 'unknown command "hasOwnProperty"'],
     [["prep", "--nope"], 'unknown option "--nope"'],
     [["prep", "--base"], "--base needs a value"],
     [["prep", "--base="], "--base needs a value"],

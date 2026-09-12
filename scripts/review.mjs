@@ -477,7 +477,9 @@ function main(argv) {
     process.stdout.write(usage());
     return EXIT.ok;
   }
-  const run = COMMANDS[command];
+  // Own properties only: a plain object also answers "constructor", "toString",
+  // and the rest of `Object.prototype`, and calling one of those crashes.
+  const run = Object.hasOwn(COMMANDS, command) ? COMMANDS[command] : undefined;
   if (!run) throw new UsageError(`unknown command "${command}"`);
   return run(rest);
 }
