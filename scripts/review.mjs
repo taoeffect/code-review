@@ -431,13 +431,19 @@ function print(payload) {
  * folder is still readable to a person.
  */
 function createRun(runRoot) {
-  mkdirSync(runRoot, { recursive: true });
   const createdAt = new Date().toISOString();
   const stamp = createdAt.replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
   const runId = `run-${stamp}-${randomBytes(3).toString("hex")}`;
   const runDir = join(runRoot, runId);
-  // Not recursive, so a name already in use is an error rather than a takeover.
-  mkdirSync(runDir);
+  // A read-only git folder is the operator's to fix, so both writes below say
+  // what failed in one sentence instead of reaching `report`'s stack branch.
+  try {
+    mkdirSync(runRoot, { recursive: true });
+    // Not recursive, so a name already in use is an error rather than a takeover.
+    mkdirSync(runDir);
+  } catch (error) {
+    throw new ReviewError(`Could not create the run folder ${runDir}: ${error.message}`);
+  }
   try {
     writeFileSync(
       join(runDir, MARKER_NAME),
@@ -448,7 +454,10 @@ function createRun(runRoot) {
     // time: `sweepRuns` skips it and `resolveManagedRun` rejects it. Undo the
     // folder here, while we still know it is ours.
     rmSync(runDir, { recursive: true, force: true });
-    throw error;
+    throw new ReviewError(
+      `Could not write the run folder's ${MARKER_NAME} file: ${error.message}\n` +
+        "The folder was removed, so nothing was left behind.",
+    );
   }
   return runDir;
 }

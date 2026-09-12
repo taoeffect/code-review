@@ -2121,15 +2121,14 @@ test("prep: a failure after the run folder exists removes it", (check) => {
   const before = snapshot(dir);
   const result = review(dir, ["prep"]);
   unchanged(check, before, snapshot(dir), "prep");
-  check.eq(result.code, 1, `exit code (stderr: ${clip(result.stderr)})`);
-  check.eq(result.stdout, "", "stdout must stay empty");
+  failedRun(check, result, 1, "prep with an object it cannot read");
   check.has(result.stderr, "README.md", "the failure names the object it could not read");
   const runRoot = join(dir, RUN_ROOT);
   const left = existsSync(runRoot) ? readdirSync(runRoot) : [];
   check.deep(left, [], "the partial run folder was removed");
 });
 
-test("prep: a run folder whose marker cannot be written is undone", (check) => {
+test("prep: a run folder it cannot create or mark fails with a sentence", (check) => {
   const dir = simpleRepo("prep-marker");
   // A umask of 222 makes every folder the CLI creates read-only, so `mkdir`
   // still works and the marker write inside the new folder gets EACCES. That
@@ -2149,22 +2148,28 @@ test("prep: a run folder whose marker cannot be written is undone", (check) => {
   }
   if (!check.ok(refused, "this case needs a user a read-only folder can refuse: do not run the suite as root")) return;
 
-  // The run root has to exist already, or the hostile umask makes that folder
-  // read-only instead and the run folder is never created at all.
+  // The run root has to exist already for the marker to be the failing write:
+  // with no run root the hostile umask makes that folder read-only instead and
+  // the run folder is never created. Both branches are checked, in that order.
   const first = jsonOut(check, review(dir, ["prep"]), "first prep");
   if (!first) return;
 
   const before = snapshot(dir);
   const result = review(dir, ["prep"], {}, wrapper);
   unchanged(check, before, snapshot(dir), "prep under a hostile umask");
-  check.eq(result.code, 1, `exit code (stderr: ${clip(result.stderr)})`);
-  check.eq(result.stdout, "", "stdout must stay empty");
+  failedRun(check, result, 1, "prep whose marker cannot be written");
   check.has(result.stderr, MARKER, "the failure names the marker file it could not write");
   const runRoot = join(dir, RUN_ROOT);
   check.deep(readdirSync(runRoot), [], "no unmarked folder is left behind");
 
   const cleaned = jsonOut(check, review(dir, ["clean", "--all"]), "clean --all");
   check.deep(cleaned?.removed, [], "clean --all has nothing left to remove");
+
+  const fresh = simpleRepo("prep-marker-fresh");
+  const early = review(fresh, ["prep"], {}, wrapper);
+  failedRun(check, early, 1, "prep whose run folder cannot be created");
+  check.has(early.stderr, "Could not create the run folder", "the failure says what it could not create");
+  check.deep(readdirSync(join(fresh, RUN_ROOT)), [], "no run folder was created");
 });
 
 test("prep: usage faults", (check) => {
@@ -2753,8 +2758,8 @@ test("clean: outside a repository", (check) => {
 
   failedRun(check, review(plain, ["clean"]), 1, "clean with no flags outside a repository");
   const sweep = review(plain, ["clean", "--all"]);
-  check.eq(sweep.code, 1, `clean --all outside a repository: exit code (stderr: ${clip(sweep.stderr)})`);
-  check.eq(sweep.stdout, "", "clean --all outside a repository: no JSON");
+  failedRun(check, sweep, 1, "clean --all outside a repository");
+  check.has(sweep.stderr, "not a git repository", "the failure says there is no repository");
 });
 
 // ---------------------------------------------------------------------------
