@@ -446,6 +446,20 @@ const AMBIGUOUS_DIFF =
   "old mode 100644\n" +
   "new mode 100755\n";
 
+// A file start line no rule can split into two paths, which is what a
+// repository setting `diff.srcPrefix` and `diff.dstPrefix` would produce if the
+// CLI did not pin both keys.
+const UNREADABLE_START_DIFF =
+  "diff --git i/src/app.js w/src/app.js\n" +
+  "index 1111111..2222222 100644\n" +
+  "--- i/src/app.js\n" +
+  "+++ w/src/app.js\n" +
+  "@@ -1,3 +1,3 @@\n" +
+  " one\n" +
+  "-two\n" +
+  "+TWO\n" +
+  " three\n";
+
 const COMBINED_DIFF =
   "diff --cc src/merged.txt\n" +
   "index 1111111,2222222..3333333\n" +
@@ -665,6 +679,19 @@ test("diff: ambiguous unquoted file start lines", (check) => {
   // A record with no hunks still has to reach exactly one slice.
   const plan = planSlices({ files: parsed.files, target: 10 });
   check.none(checkPlan(parsed, plan), "checkPlan");
+});
+
+test("diff: an unreadable file start line is a problem, not a warning", (check) => {
+  const parsed = parseDiff(UNREADABLE_START_DIFF);
+  check.eq(parsed.files.length, 1, "file sections");
+  check.deep(parsed.warnings, [], "warnings");
+  check.eq(parsed.files[0].pathsUnreadable, true, "pathsUnreadable");
+  // The `---` and `+++` lines still answer, but with prefixes no file has, so
+  // the paths must not be trusted.
+  check.eq(parsed.files[0].path, "w/src/app.js", "the guessed path keeps the odd prefix");
+  const problems = checkParse(parsed);
+  check.eq(problems.length, 1, `problems: ${clip(problems.join(" | "))}`);
+  check.has(problems[0] ?? "", "could not read the paths from: diff --git i/src/app.js w/src/app.js", "problem wording");
 });
 
 test("diff: a truncated diff with no final newline", (check) => {
@@ -1086,6 +1113,56 @@ test("prep: the exclusion list and --exclude", (check) => {
   check.deep(second?.files.map((file) => file.path), ["src/app.js"], "--exclude adds to the list");
 });
 
+// Config that would change the shape of a diff the parser reads. `diff.srcPrefix`
+// and `diff.dstPrefix` are the pair `diff.noprefix=false` does not neutralise.
+const HOSTILE_DIFF_CONFIG = [
+  ["diff.noprefix", "true"],
+  ["diff.mnemonicPrefix", "true"],
+  ["diff.srcPrefix", "i/"],
+  ["diff.dstPrefix", "w/"],
+  ["diff.relative", "true"],
+  ["diff.external", "/bin/false"],
+  ["color.ui", "always"],
+  ["color.diff", "always"],
+];
+
+test("prep: hostile diff config cannot change the diff shape", (check) => {
+  const dir = simpleRepo("prep-hostile-config");
+  for (const [key, value] of HOSTILE_DIFF_CONFIG) gitAt(dir, ["config", key, value]);
+  // The same keys once more one layer up, so neither local nor global config
+  // reaches the diff.
+  const globalConfig = join(WORK, "hostile.gitconfig");
+  writeFileSync(
+    globalConfig,
+    "[diff]\n\tnoprefix = true\n\tsrcPrefix = x/\n\tdstPrefix = y/\n\texternal = /bin/false\n[color]\n\tui = always\n",
+  );
+  const env = { GIT_CONFIG_GLOBAL: globalConfig };
+
+  const before = snapshot(dir);
+  const out = jsonOut(check, review(dir, ["prep"], env), "prep");
+  unchanged(check, before, snapshot(dir), "prep with hostile diff config");
+  if (!out) return;
+  check.deep(out.files.map((file) => file.path), ["src/new.js"], "prep reports the real path");
+
+  const text = readDiff(out.diffFile);
+  check.has(text, "diff --git a/src/new.js b/src/new.js", "the file start line keeps the a/ and b/ prefixes");
+  check.hasNot(text, "\u001b[", "no colour escape sequences");
+  const parsed = parseDiff(text);
+  check.deep(parsed.warnings, [], "full.diff warnings");
+  check.none(checkParse(parsed), "full.diff checkParse");
+  check.eq(parsed.files[0]?.path, "src/new.js", "the parsed path");
+
+  // The manifest is what worker packets are built from, so every path in it
+  // must name a file of the merged source snapshot.
+  const manifest = jsonOut(check, review(dir, ["split", "--run-dir", out.runDir], env), "split");
+  if (!manifest) return;
+  for (const slice of manifest.slices) {
+    for (const file of slice.files) {
+      check.ok(existsSync(join(manifest.sourceDir, file.path)), `${file.path} is in the source snapshot`);
+    }
+  }
+});
+
 test("prep: a stale marked run goes, a neighbour stays", (check) => {
   const dir = simpleRepo("prep-stale");
   const first = jsonOut(check, review(dir, ["prep"]), "first prep");
@@ -1368,6 +1445,22 @@ test("split: refused run folders", (check) => {
     "split with a relative --run-dir",
   );
   check.eq(named?.runDir, prepped.runDir, "the relative path names the same run");
+});
+
+test("split: an unreadable file start line stops the run", (check) => {
+  const dir = simpleRepo("split-unreadable-start");
+  const prepped = jsonOut(check, review(dir, ["prep"]), "prep");
+  if (!prepped) return;
+  const before = snapshot(dir);
+
+  writeFileSync(join(prepped.runDir, "full.diff"), UNREADABLE_START_DIFF);
+  const result = review(dir, ["split", "--run-dir", prepped.runDir]);
+  failedRun(check, result, 6, "split on a diff whose file start line cannot be read");
+  check.has(result.stderr, "could not read the paths from", "the unreadable line is named");
+  check.has(result.stderr, "Nothing was reviewed", "it says nothing was reviewed");
+  check.eq(sliceFilesOnDisk(prepped.runDir), null, "no slices were written");
+  check.eq(existsSync(join(prepped.runDir, "manifest.json")), false, "no manifest was written");
+  unchanged(check, before, snapshot(dir), "a failed self-check");
 });
 
 test("split: usage faults and a run folder with no full.diff", (check) => {

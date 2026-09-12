@@ -50,8 +50,25 @@ export const DEFAULT_EXCLUDES = [
 ];
 
 // User config must not change the shape of a diff we parse. `color.ui=always`,
-// `diff.noprefix`, `diff.relative`, and an external diff driver all would.
-const DIFF_CONFIG = ["-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "-c", "diff.relative=false"];
+// `diff.noprefix`, `diff.mnemonicPrefix`, `diff.relative`, `diff.srcPrefix`,
+// `diff.dstPrefix`, and an external diff driver all would. The two prefix keys
+// arrived in git 2.41 and are not covered by `diff.noprefix=false`: without
+// them a repository setting `diff.srcPrefix=i/` produces
+// `diff --git i/f.txt w/f.txt`, and every path we report gains a prefix that no
+// file has. Git ignores config keys it does not know, so pinning them is safe
+// on 2.38 through 2.40, where no config could change the prefixes anyway.
+const DIFF_CONFIG = [
+  "-c",
+  "diff.noprefix=false",
+  "-c",
+  "diff.mnemonicPrefix=false",
+  "-c",
+  "diff.relative=false",
+  "-c",
+  "diff.srcPrefix=a/",
+  "-c",
+  "diff.dstPrefix=b/",
+];
 const DIFF_FLAGS = ["--no-color", "--no-ext-diff", "--no-textconv"];
 
 export class GitError extends Error {

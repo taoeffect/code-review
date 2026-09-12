@@ -38,8 +38,10 @@ const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/;
  *
  * Each file record is
  * `{ index, path, oldPath, newPath, status, binary, modeOnly, renameOnly,
- *    header, text, hunks, added, deleted, changed }`, where `path`, `oldPath`,
- *    and `newPath` are decoded text and `header` and `text` are raw bytes.
+ *    pathsUnreadable, header, text, hunks, added, deleted, changed }`, where
+ *    `path`, `oldPath`, and `newPath` are decoded text, `header` and `text` are
+ *    raw bytes, and `pathsUnreadable` says the `diff --git` line could not be
+ *    split into two paths, so every path here is a guess.
  *
  * Each hunk record is
  * `{ index, headerLine, text, heading, oldStart, oldLines, newStart, newLines,
@@ -79,7 +81,7 @@ function parseFile(cursor, index, warnings) {
   const hunks = [];
   while (isHunkStart(cursor.peek())) hunks.push(parseHunk(cursor, hunks.length, warnings));
 
-  const facts = readHeaderFacts(headerLines, warnings);
+  const facts = readHeaderFacts(headerLines);
   let added = 0;
   let deleted = 0;
   for (const hunk of hunks) {
@@ -95,6 +97,7 @@ function parseFile(cursor, index, warnings) {
     binary: facts.binary,
     modeOnly: hunks.length === 0 && !facts.binary && facts.modeChanged && facts.status === "M",
     renameOnly: hunks.length === 0 && (facts.status === "R" || facts.status === "C"),
+    pathsUnreadable: facts.pathsUnreadable,
     header: cursor.source.slice(start, headerEnd),
     text: cursor.source.slice(start, cursor.pos),
     hunks,
@@ -181,7 +184,7 @@ function parseHunk(cursor, index, warnings) {
 // Paths come from the `---` and `+++` lines when they exist, because those are
 // unambiguous. A binary, mode-only, or pure rename section has no such lines, so
 // the rename lines or the `diff --git` line answer instead.
-function readHeaderFacts(headerLines, warnings) {
+function readHeaderFacts(headerLines) {
   let status = "M";
   let binary = false;
   let modeChanged = false;
@@ -211,14 +214,14 @@ function readHeaderFacts(headerLines, warnings) {
     else if (line.startsWith("Binary files ") || line.startsWith("GIT binary patch")) binary = true;
   }
 
-  const fromLine = parseFileStartLine(headerLines[0], warnings);
+  const fromLine = parseFileStartLine(headerLines[0]);
   let oldPath = fromLine.oldPath;
   let newPath = fromLine.newPath;
   if (oldSide !== null) oldPath = sidePath(oldSide);
   if (newSide !== null) newPath = sidePath(newSide);
   if (renameFrom !== null) oldPath = stripSidePrefix(renameFrom);
   if (renameTo !== null) newPath = stripSidePrefix(renameTo);
-  return { status, binary, modeChanged, oldPath, newPath };
+  return { status, binary, modeChanged, oldPath, newPath, pathsUnreadable: fromLine.unreadable };
 }
 
 function sidePath(raw) {
@@ -229,30 +232,35 @@ function sidePath(raw) {
 // `diff --git a/x b/x` is ambiguous when a path holds a space, because there is
 // no separator. Git quotes a path that holds anything worse than a space, so the
 // unquoted case is settled by looking for the split where both sides name the
-// same path.
-function parseFileStartLine(line, warnings) {
+// same path. A line no branch here can split leaves `unreadable` set: the paths
+// of that section, wherever they then come from, are guesses, and `checkParse`
+// reports it.
+function parseFileStartLine(line) {
   const rest = line.slice(FILE_START.length);
   if (rest.startsWith('"')) {
     const end = quotedEnd(rest);
-    return { oldPath: sidePath(rest.slice(0, end + 1)), newPath: sidePath(rest.slice(end + 2)) };
+    return { oldPath: sidePath(rest.slice(0, end + 1)), newPath: sidePath(rest.slice(end + 2)), unreadable: false };
   }
   const quotedSecond = rest.indexOf(' "');
   if (quotedSecond !== -1) {
-    return { oldPath: sidePath(rest.slice(0, quotedSecond)), newPath: sidePath(rest.slice(quotedSecond + 1)) };
+    return {
+      oldPath: sidePath(rest.slice(0, quotedSecond)),
+      newPath: sidePath(rest.slice(quotedSecond + 1)),
+      unreadable: false,
+    };
   }
   for (let at = rest.indexOf(" b/"); at !== -1; at = rest.indexOf(" b/", at + 1)) {
     const left = rest.slice(0, at);
     const right = rest.slice(at + 1);
     if (left.startsWith("a/") && left.slice(2) === right.slice(2)) {
-      return { oldPath: sidePath(left), newPath: sidePath(right) };
+      return { oldPath: sidePath(left), newPath: sidePath(right), unreadable: false };
     }
   }
   const last = rest.lastIndexOf(" b/");
   if (last !== -1) {
-    return { oldPath: sidePath(rest.slice(0, last)), newPath: sidePath(rest.slice(last + 1)) };
+    return { oldPath: sidePath(rest.slice(0, last)), newPath: sidePath(rest.slice(last + 1)), unreadable: false };
   }
-  warnings.push(`could not read the paths from: ${line}`);
-  return { oldPath: null, newPath: null };
+  return { oldPath: null, newPath: null, unreadable: true };
 }
 
 function stripSidePrefix(path) {
@@ -552,7 +560,13 @@ export function checkParse(parsed) {
   }
   at += parsed.preamble.length;
 
+  // A `diff --git` line we cannot split into two paths means every path of that
+  // section is a guess, and the manifest built from it would send a reviewing
+  // agent to a file that may not exist. Fatal, not a warning.
   for (const file of parsed.files) {
+    if (file.pathsUnreadable) {
+      problems.push(`could not read the paths from: ${firstLine(file.header)}`);
+    }
     if (file.header + file.hunks.map((hunk) => hunk.text).join("") !== file.text) {
       problems.push(`${file.path}: header plus hunks do not rebuild the file section`);
     }
@@ -656,6 +670,11 @@ function countLines(text) {
   let count = 0;
   for (let at = text.indexOf("\n"); at !== -1; at = text.indexOf("\n", at + 1)) count += 1;
   return text.endsWith("\n") ? count : count + 1;
+}
+
+function firstLine(text) {
+  const stop = text.indexOf("\n");
+  return stop === -1 ? text : text.slice(0, stop);
 }
 
 // A one-line-at-a-time reader over the whole diff. It hands out offsets so every
