@@ -1553,7 +1553,11 @@ test("prep: a base behind its tracking ref warns", (check) => {
 
 test("prep: no tracking ref reports null", (check) => {
   const dir = simpleRepo("prep-no-tracking");
-  const out = jsonOut(check, review(dir, ["prep"]), "prep");
+
+  const before = snapshot(dir);
+  const result = review(dir, ["prep"]);
+  unchanged(check, before, snapshot(dir), "prep");
+  const out = jsonOut(check, result, "prep");
   check.eq(out?.baseBehindTrackingRef, null, "baseBehindTrackingRef");
 });
 
@@ -2310,6 +2314,9 @@ test("clean: a repository reached through a symlink", (check) => {
   const view = join(WORK, "clean-symlink-view");
   symlinkSync(real, view);
 
+  // Taken through the real path, because that is the repository the delete
+  // must leave alone.
+  const before = snapshot(real);
   const prepped = jsonOut(check, review(view, ["prep"]), "prep through the symlink");
   if (!prepped) return;
   // `git rev-parse --show-toplevel` resolves the link, so prep reports the real
@@ -2320,6 +2327,7 @@ test("clean: a repository reached through a symlink", (check) => {
   const out = jsonOut(check, review(view, ["clean", "--run-dir", throughLink]), "clean through the symlink");
   check.deep(out?.removed, [prepped.runDir], "the run is reported by its real path");
   check.eq(existsSync(prepped.runDir), false, "the run folder is gone");
+  unchanged(check, before, snapshot(real), "prep and clean through the symlink");
 });
 
 test("clean: outside a repository", (check) => {
