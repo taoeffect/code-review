@@ -136,17 +136,22 @@ function parseFlags(args, spec) {
     const found = /^--([a-z][a-z0-9-]*)(?:=([\s\S]*))?$/.exec(token);
     if (!found) throw new UsageError(`unexpected argument "${token}"`);
     const [, dashed, inlineValue] = found;
-    const kind = spec[camelCase(dashed)];
-    if (!kind) throw new UsageError(`unknown option "--${dashed}"`);
+    // `Object.hasOwn`, because a plain object literal answers `toString`,
+    // `constructor`, and the rest of `Object.prototype` with an inherited
+    // function. Reading the value straight through let those names pass the
+    // unknown-option guard and then swallow the next token as a value.
+    const name = camelCase(dashed);
+    if (!Object.hasOwn(spec, name)) throw new UsageError(`unknown option "--${dashed}"`);
+    const kind = spec[name];
     if (kind === "flag") {
       if (inlineValue !== undefined) throw new UsageError(`--${dashed} takes no value`);
-      parsed[camelCase(dashed)] = true;
+      parsed[name] = true;
       continue;
     }
     const value = inlineValue ?? args[index++];
     if (value === undefined || value === "") throw new UsageError(`--${dashed} needs a value`);
-    if (kind === "list") parsed[camelCase(dashed)].push(value);
-    else parsed[camelCase(dashed)] = value;
+    if (kind === "list") parsed[name].push(value);
+    else parsed[name] = value;
   }
   return parsed;
 }

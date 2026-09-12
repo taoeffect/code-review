@@ -1634,6 +1634,11 @@ test("prep: usage faults", (check) => {
     [["__proto__"], 'unknown command "__proto__"'],
     [["hasOwnProperty"], 'unknown command "hasOwnProperty"'],
     [["prep", "--nope"], 'unknown option "--nope"'],
+    // An option name that `Object.prototype` answers. Both passed the
+    // unknown-option guard as an inherited function, and the second one then
+    // ate "zzz" as its value and ran prep for real.
+    [["prep", "--constructor"], 'unknown option "--constructor"'],
+    [["prep", "--to-string", "zzz"], 'unknown option "--to-string"'],
     [["prep", "--base"], "--base needs a value"],
     [["prep", "--base="], "--base needs a value"],
     [["prep", "extra"], 'unexpected argument "extra"'],
