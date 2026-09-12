@@ -209,12 +209,8 @@ function prep(args) {
   }
 
   const runRoot = managedRunRoot(opts);
-  const stale = sweepRuns(runRoot);
-  if (stale.length > 0) {
-    warn(`Removed ${stale.length} run folder(s) left by an interrupted review.`);
-  }
-
   const runDir = createRun(runRoot);
+  let payload;
   try {
     const from = base.sha;
     const to = merged.tree;
@@ -235,7 +231,7 @@ function prep(args) {
       warn("That is still work to review.");
     }
 
-    print({
+    payload = {
       baseRef: base.shortName,
       baseSha: base.sha,
       headSha: head.sha,
@@ -249,14 +245,29 @@ function prep(args) {
       massive: changed >= MASSIVE_CHANGED_LINES,
       commits: commitSubjects(base.sha, head.sha, opts),
       contextFiles: CONTEXT_FILES.filter((name) => existsSync(join(sourceDir, name))),
-    });
-    return EXIT.ok;
+    };
   } catch (error) {
-    // A half-written run is worse than none: the next prep would sweep it away
-    // anyway, and split must never read one.
+    // A half-written run is worse than none: split must never read one.
     rmSync(runDir, { recursive: true, force: true });
     throw error;
   }
+
+  // The earlier runs go only now that this one is complete. Sweeping before the
+  // work above would leave no run at all when that work fails, and a sweep that
+  // cannot finish is no reason to throw away a run that can be reviewed, so its
+  // failure is a warning rather than the end of the command.
+  try {
+    const stale = sweepRuns(runRoot, runDir);
+    if (stale.length > 0) {
+      warn(`Removed ${stale.length} run folder(s) left by an earlier review, finished or interrupted.`);
+    }
+  } catch (error) {
+    warn(`Could not remove every earlier run folder under ${runRoot}: ${error.message}`);
+    warn("The run below is complete and is the one to review.");
+  }
+
+  print(payload);
+  return EXIT.ok;
 }
 
 /**
@@ -463,11 +474,15 @@ function createRun(runRoot) {
 }
 
 /**
- * Remove the run folders of interrupted reviews. A review is one run and cannot
- * resume, so any run already sitting here is finished with. Only marked direct
- * children go, which leaves anything else under the git folder alone.
+ * Remove the run folders of earlier reviews, except `keep`. A review is one run
+ * and cannot resume, so a run already sitting here is finished with, whether
+ * its review ended or was interrupted. Only marked direct children go, which
+ * leaves anything else under the git folder alone.
+ *
+ * `keep` is the run this command has just made, and a plain string comparison
+ * finds it because both paths are built by joining the same `runRoot`.
  */
-function sweepRuns(runRoot) {
+function sweepRuns(runRoot, keep = null) {
   const removed = [];
   let entries;
   try {
@@ -480,6 +495,7 @@ function sweepRuns(runRoot) {
     // False for a symlink, so a link pointing outside the run root is skipped.
     if (!entry.isDirectory()) continue;
     const candidate = join(runRoot, entry.name);
+    if (candidate === keep) continue;
     if (!isMarkedRun(candidate)) continue;
     rmSync(candidate, { recursive: true, force: true });
     removed.push(candidate);

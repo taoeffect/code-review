@@ -2103,15 +2103,58 @@ test("prep: a stale marked run goes, a neighbour stays", (check) => {
   const result = review(dir, ["prep"]);
   unchanged(check, before, snapshot(dir), "second prep");
   const second = jsonOut(check, result, "second prep");
-  check.has(result.stderr, "Removed 1 run folder(s)", "the sweep is reported");
+  check.has(
+    result.stderr,
+    "Removed 1 run folder(s) left by an earlier review, finished or interrupted.",
+    "the sweep is reported, and the sentence does not claim the run was interrupted",
+  );
   check.eq(existsSync(first.runDir), false, "the stale run is gone");
   check.ok(existsSync(neighbour), "an unmarked neighbour stays");
   check.ok(existsSync(loose), "a loose file stays");
   check.ok(second && existsSync(second.runDir), "the new run folder is there");
 });
 
-test("prep: a failure after the run folder exists removes it", (check) => {
+test("prep: a sweep it cannot finish still hands over a complete run", (check) => {
+  const dir = simpleRepo("prep-sweep-fault");
+  const first = jsonOut(check, review(dir, ["prep"]), "first prep");
+  if (!first) return;
+
+  // A run root with no read bit refuses `readdir` while still taking a new
+  // folder, so the sweep is the only part of the command that fails. Root is
+  // refused by no mode bit, so this has to be proven before it is relied on.
+  const runRoot = dirname(first.runDir);
+  chmodSync(runRoot, 0o333);
+  try {
+    let refused = false;
+    try {
+      readdirSync(runRoot);
+    } catch {
+      refused = true;
+    }
+    if (!check.ok(refused, "this case needs a user an unreadable folder can refuse: do not run the suite as root")) {
+      return;
+    }
+
+    const before = snapshot(dir);
+    const result = review(dir, ["prep"]);
+    unchanged(check, before, snapshot(dir), "prep over a run root it cannot read");
+    const second = jsonOut(check, result, "second prep");
+    check.has(result.stderr, "Could not remove every earlier run folder", "the sweep fault is reported");
+    check.ok(second && existsSync(join(second.runDir, "full.diff")), "the new run holds its diff");
+    check.ok(second && existsSync(join(second.runDir, "source")), "the new run holds its source snapshot");
+  } finally {
+    // Leaving the run root unreadable would stop the suite removing its own
+    // temp folder.
+    chmodSync(runRoot, 0o755);
+  }
+});
+
+test("prep: a failure after the run folder exists removes it and keeps the earlier run", (check) => {
   const dir = simpleRepo("prep-partial");
+  // An earlier run is what proves the sweep waits: a prep that fails must not
+  // have destroyed the only reviewable run on its way in.
+  const first = jsonOut(check, review(dir, ["prep"]), "first prep");
+  if (!first) return;
   // Both branches hold this blob unchanged, so the diff never reads it and
   // only the source snapshot trips over it: a failure after the run folder is
   // already on disk.
@@ -2123,9 +2166,12 @@ test("prep: a failure after the run folder exists removes it", (check) => {
   unchanged(check, before, snapshot(dir), "prep");
   failedRun(check, result, 1, "prep with an object it cannot read");
   check.has(result.stderr, "README.md", "the failure names the object it could not read");
-  const runRoot = join(dir, RUN_ROOT);
-  const left = existsSync(runRoot) ? readdirSync(runRoot) : [];
-  check.deep(left, [], "the partial run folder was removed");
+  const runRoot = dirname(first.runDir);
+  check.deep(
+    readdirSync(runRoot),
+    [basename(first.runDir)],
+    "the partial run folder went and the earlier run stayed",
+  );
 });
 
 test("prep: a run folder it cannot create or mark fails with a sentence", (check) => {
@@ -2159,11 +2205,14 @@ test("prep: a run folder it cannot create or mark fails with a sentence", (check
   unchanged(check, before, snapshot(dir), "prep under a hostile umask");
   failedRun(check, result, 1, "prep whose marker cannot be written");
   check.has(result.stderr, MARKER, "the failure names the marker file it could not write");
-  const runRoot = join(dir, RUN_ROOT);
-  check.deep(readdirSync(runRoot), [], "no unmarked folder is left behind");
+  // The earlier run is still there: the sweep runs only after a complete run,
+  // and this prep never got that far. What must never be there is an unmarked
+  // folder, because nothing this tool offers could remove one.
+  const runRoot = dirname(first.runDir);
+  check.deep(readdirSync(runRoot), [basename(first.runDir)], "no unmarked folder is left behind");
 
   const cleaned = jsonOut(check, review(dir, ["clean", "--all"]), "clean --all");
-  check.deep(cleaned?.removed, [], "clean --all has nothing left to remove");
+  check.deep(cleaned?.removed, [first.runDir], "clean --all removes the earlier run and nothing else");
 
   const fresh = simpleRepo("prep-marker-fresh");
   const early = review(fresh, ["prep"], {}, wrapper);
