@@ -149,6 +149,12 @@ function parseFlags(args, spec) {
     }
     const value = inlineValue ?? args[index++];
     if (value === undefined || value === "") throw new UsageError(`--${dashed} needs a value`);
+    // A separate token that looks like an option is a typo, not a value.
+    // `--base --exclude foo` used to set base to "--exclude" and then fault on
+    // "foo". The inline form still writes a value that starts with two dashes.
+    if (inlineValue === undefined && value.startsWith("--")) {
+      throw new UsageError(`--${dashed} needs a value, but "${value}" is an option. Write --${dashed}=${value} to pass it as the value.`);
+    }
     if (kind === "list") parsed[name].push(value);
     else parsed[name] = value;
   }

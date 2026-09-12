@@ -1958,6 +1958,10 @@ test("prep: the exclusion list and --exclude", (check) => {
     "src/bundle.min.js",
     "src/generated.js",
     "src/app.js",
+    // A real file whose name starts with two dashes. Only the `--exclude=...`
+    // form can name it, because a separate token shaped like an option is
+    // refused as a typo.
+    "--dashed.js",
   ];
   for (const path of files) put(dir, path, lines("old", 3));
   commitAll(dir, "base commit");
@@ -1969,11 +1973,15 @@ test("prep: the exclusion list and --exclude", (check) => {
   const first = jsonOut(check, review(dir, ["prep"]), "prep");
   check.deep(
     first?.files.map((file) => file.path),
-    ["src/app.js", "src/generated.js"],
+    ["--dashed.js", "src/app.js", "src/generated.js"],
     "the default list leaves out the lock file at the top level too",
   );
 
-  const second = jsonOut(check, review(dir, ["prep", "--exclude", "**/generated.js"]), "prep --exclude");
+  const second = jsonOut(
+    check,
+    review(dir, ["prep", "--exclude", "**/generated.js", "--exclude=--dashed.js"]),
+    "prep --exclude",
+  );
   unchanged(check, before, snapshot(dir), "prep");
   check.deep(second?.files.map((file) => file.path), ["src/app.js"], "--exclude adds to the list");
 });
@@ -2248,6 +2256,12 @@ test("prep: usage faults", (check) => {
     [["prep", "--to-string", "zzz"], 'unknown option "--to-string"'],
     [["prep", "--base"], "--base needs a value"],
     [["prep", "--base="], "--base needs a value"],
+    // An option name where a value belongs is a typo. `--base --exclude foo`
+    // set base to the literal "--exclude" and then faulted on "foo", and
+    // `--base --exclude` on its own reported the base-ref exit code, 4.
+    [["prep", "--base", "--exclude", "foo"], '--base needs a value, but "--exclude" is an option'],
+    [["prep", "--base", "--exclude"], "Write --base=--exclude to pass it as the value"],
+    [["prep", "--exclude", "--base", "main"], '--exclude needs a value, but "--base" is an option'],
     [["prep", "extra"], 'unexpected argument "extra"'],
   ];
   for (const [args, wanted] of faults) {
@@ -2611,6 +2625,7 @@ test("split: usage faults, a full.diff that cannot be read, and a missing one", 
     [["split", "--run-dir", prepped.runDir, "extra"], 'unexpected argument "extra"'],
     [["split", "--run-dir", prepped.runDir, "--nope"], 'unknown option "--nope"'],
     [["split", "--run-dir"], "--run-dir needs a value"],
+    [["split", "--run-dir", "--target", "900"], '--run-dir needs a value, but "--target" is an option'],
   ];
   for (const [args, wanted] of faults) {
     const result = review(dir, args);
