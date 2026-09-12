@@ -1,14 +1,15 @@
 ---
 name: code-review
-description: "Performs an agentic code review of recent changes and outputs the results. Outputs a structured Markdown review to a file (default REVIEW.md)."
+description: "Performs an agentic code review of recent changes and outputs the results. Outputs a structured Markdown review (default REVIEW.md)."
 ---
 
 # Agentic Code Review
 
 Review the merged result of the current branch against its base. Inspect every
 changed line and write one Markdown review. The output defaults to `REVIEW.md` in
-the project root unless the user names another file. Set `<skill-dir>` to the
-directory containing this file.
+the project root unless the user names another file or no file (e.g. "STDOUT",
+"print to screen", "no file", etc). `<skill-dir>` refers to the directory containing
+this SKILL.md file.
 
 ## 1. Prepare
 
