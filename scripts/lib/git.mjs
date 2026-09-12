@@ -56,7 +56,11 @@ export const DEFAULT_EXCLUDES = [
 // `diff --git i/f.txt w/f.txt`, and every path we report gains a prefix that no
 // file has. Git ignores config keys it does not know, so pinning them is safe
 // on 2.38 through 2.40, where no config could change the prefixes anyway.
-const DIFF_CONFIG = [
+//
+// Exported with `DIFF_FLAGS` so the self-test can read a fixture diff exactly
+// as the CLI does, instead of keeping a second list that can drift from this
+// one.
+export const DIFF_CONFIG = [
   "-c",
   "diff.noprefix=false",
   "-c",
@@ -74,7 +78,7 @@ const DIFF_CONFIG = [
 // delete plus a full add in the patch while `numstat` still reports two
 // changed lines, and `copies` turns a copy into a zero-line record in the
 // patch while the counts call it a whole new file.
-const DIFF_FLAGS = ["--no-color", "--no-ext-diff", "--no-textconv", "--find-renames"];
+export const DIFF_FLAGS = ["--no-color", "--no-ext-diff", "--no-textconv", "--find-renames"];
 
 export class GitError extends Error {
   constructor(message, code = "GIT_FAILED") {

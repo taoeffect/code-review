@@ -47,6 +47,7 @@ import {
   sliceText,
   unquotePath,
 } from "./lib/diff.mjs";
+import { DIFF_CONFIG, DIFF_FLAGS } from "./lib/git.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = join(HERE, "review.mjs");
@@ -133,12 +134,47 @@ function clip(text, limit = 400) {
 
 let WORK = "";
 
+/**
+ * The machine must not reach a fixture. Without this, every fixture inherits
+ * the whole global and system config plus whatever git variables the shell
+ * happens to hold, and cases fail for reasons that have nothing to do with the
+ * code under test: `diff.renames=false` splits a rename into a delete and an
+ * add, `diff.interHunkContext=20` merges hunks that a case needs apart,
+ * `core.quotepath=false` silently removes the quoted-path coverage,
+ * `core.hooksPath` runs a stranger's hooks inside every commit, a system
+ * `gitattributes` marked `-diff` turns a text fixture into a binary one, a
+ * stray alternate object store makes objects readable that a fixture has
+ * deliberately broken, and a stray `GIT_DIR` sends `git init` somewhere else
+ * entirely.
+ *
+ * A value of `undefined` removes the variable: `spawnSync` leaves those out of
+ * the child's environment. Dropping `GIT_CONFIG_COUNT` is what neutralises the
+ * `GIT_CONFIG_KEY_<n>` and `GIT_CONFIG_VALUE_<n>` pairs, because git reads them
+ * only up to that count.
+ *
+ * A case that wants hostile config passes it in `env`, which is merged last and
+ * therefore wins.
+ */
+const GIT_ENV = {
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_SYSTEM: "/dev/null",
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_CONFIG_COUNT: undefined,
+  GIT_ATTR_NOSYSTEM: "1",
+  GIT_TEMPLATE_DIR: undefined,
+  GIT_DIR: undefined,
+  GIT_WORK_TREE: undefined,
+  GIT_INDEX_FILE: undefined,
+  GIT_OBJECT_DIRECTORY: undefined,
+  GIT_ALTERNATE_OBJECT_DIRECTORIES: undefined,
+};
+
 function gitAt(cwd, args, { env = {}, allowFail = false, encoding = "utf8" } = {}) {
   const result = spawnSync("git", args, {
     cwd,
     encoding,
     maxBuffer: 64 * 1024 * 1024,
-    env: { ...process.env, ...env },
+    env: { ...process.env, ...GIT_ENV, ...env },
   });
   if (result.error) throw result.error;
   if (!allowFail && result.status !== 0) {
@@ -149,13 +185,21 @@ function gitAt(cwd, args, { env = {}, allowFail = false, encoding = "utf8" } = {
 
 const gitOut = (cwd, args) => gitAt(cwd, args).stdout.trim();
 
+/**
+ * A fixture diff read the way the CLI reads it. A case that parses git's own
+ * output has to ask for it with the CLI's config pins and flags, or repository
+ * config, global attributes, or an external diff driver can change the shape of
+ * the text and break the parse expectations.
+ */
+const protectedDiff = (cwd, args, opts) => gitAt(cwd, [...DIFF_CONFIG, "diff", ...DIFF_FLAGS, ...args], opts).stdout;
+
 /** Run the real CLI as a child process, exactly as the skill does. */
 function review(cwd, args, env = {}) {
   const result = spawnSync(process.execPath, [CLI, ...args], {
     cwd,
     encoding: "utf8",
     maxBuffer: 256 * 1024 * 1024,
-    env: { ...process.env, ...env },
+    env: { ...process.env, ...GIT_ENV, ...env },
   });
   if (result.error) throw result.error;
   return { code: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
@@ -180,17 +224,24 @@ function failedRun(check, result, code, label) {
   check.hasNot(result.stderr, "\n    at ", `${label}: no stack trace`);
 }
 
+/**
+ * The local config every fixture needs. `GIT_ENV` takes the global and system
+ * config away, so an identity has to be set here or no commit can be made. It
+ * is a separate helper because `git clone` copies none of this from its origin.
+ */
+function harden(dir) {
+  gitAt(dir, ["config", "user.email", "selftest@example.invalid"]);
+  gitAt(dir, ["config", "user.name", "Code Review Self Test"]);
+  gitAt(dir, ["config", "commit.gpgsign", "false"]);
+  gitAt(dir, ["config", "core.autocrlf", "false"]);
+  return dir;
+}
+
 function newRepo(name, { branch = "master" } = {}) {
   const dir = join(WORK, name);
   mkdirSync(dir, { recursive: true });
   gitAt(dir, ["init", "-q", "-b", branch]);
-  gitAt(dir, ["config", "user.email", "selftest@example.invalid"]);
-  gitAt(dir, ["config", "user.name", "Code Review Self Test"]);
-  gitAt(dir, ["config", "commit.gpgsign", "false"]);
-  // This machine's global config may set core.autocrlf=input, which would strip
-  // the carriage returns a CRLF case needs.
-  gitAt(dir, ["config", "core.autocrlf", "false"]);
-  return dir;
+  return harden(dir);
 }
 
 function put(dir, path, content) {
@@ -429,6 +480,30 @@ function encodingRepo(name, { quotePath }) {
   return dir;
 }
 
+/**
+ * One fixture holding the four things a machine's git config would change:
+ * hunks exactly ten lines apart, which `diff.interHunkContext` would merge; a
+ * pure rename, which `diff.renames=false` would split into a delete and an
+ * add; a non-ASCII name, which `core.quotepath=false` would leave unquoted; and
+ * CRLF content, which `core.autocrlf=input` would strip.
+ */
+function machineRepo(name) {
+  const dir = newRepo(name);
+  put(dir, "src/blocks.txt", blockText(4, false));
+  put(dir, "src/move me.txt", lines("moved", 5));
+  put(dir, "src/café.txt", "coffee\n");
+  put(dir, "src/crlf.txt", "one\r\ntwo\r\nthree\r\n");
+  commitAll(dir, "base commit");
+
+  gitAt(dir, ["checkout", "-q", "-b", "feature"]);
+  put(dir, "src/blocks.txt", blockText(4, true));
+  gitAt(dir, ["mv", "src/move me.txt", "src/moved.txt"]);
+  put(dir, "src/café.txt", "coffee and cake\n");
+  put(dir, "src/crlf.txt", "one\r\nTWO\r\nthree\r\n");
+  commitAll(dir, "feature work");
+  return dir;
+}
+
 // ---------------------------------------------------------------------------
 // Handmade diff fixtures
 // ---------------------------------------------------------------------------
@@ -655,12 +730,123 @@ function sliceFilesOnDisk(runDir) {
 }
 
 // ---------------------------------------------------------------------------
+// Fixture isolation
+// ---------------------------------------------------------------------------
+
+/** Config that would break cases which have nothing to do with it. */
+const MACHINE_CONFIG =
+  "[diff]\n" +
+  "\trenames = false\n" +
+  "\tinterHunkContext = 20\n" +
+  "\tnoprefix = true\n" +
+  "\texternal = /bin/false\n" +
+  "[core]\n" +
+  "\tquotepath = false\n" +
+  "\tautocrlf = input\n" +
+  "\thooksPath = /code-review-selftest-no-such-hooks\n" +
+  "[user]\n" +
+  "\tname = Machine Owner\n" +
+  "\temail = owner@example.invalid\n" +
+  "[commit]\n" +
+  "\tgpgsign = true\n";
+
+/** A template whose pre-commit hook fails, to prove `GIT_TEMPLATE_DIR` is dropped. */
+function machineTemplate() {
+  const template = join(WORK, "machine-template");
+  const hook = join(template, "hooks", "pre-commit");
+  mkdirSync(dirname(hook), { recursive: true });
+  writeFileSync(hook, "#!/bin/sh\necho the machine's hook ran >&2\nexit 1\n");
+  chmodSync(hook, 0o755);
+  return template;
+}
+
+// Every case below stands on the promise that a fixture sees nothing but its
+// own local config. This one breaks that promise on purpose: it puts hostile
+// config in files, in `GIT_CONFIG_KEY_<n>` pairs, in a commit hook template,
+// and in a git folder and object store pointing elsewhere, all in this
+// process's own environment, which both spawn helpers inherit from.
+//
+// `GIT_ENV` does not drop `GIT_EXTERNAL_DIFF`, and nothing drops
+// `diff.external`: an external driver is refused by the `--no-ext-diff` in the
+// CLI's own diff flags, which is why a case must read a fixture diff through
+// `protectedDiff`.
+test("harness: the machine's git config and environment cannot reach a fixture", (check) => {
+  const config = join(WORK, "machine.gitconfig");
+  writeFileSync(config, MACHINE_CONFIG);
+  const hostile = {
+    GIT_CONFIG_GLOBAL: config,
+    GIT_CONFIG_SYSTEM: config,
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "diff.interHunkContext",
+    GIT_CONFIG_VALUE_0: "20",
+    GIT_EXTERNAL_DIFF: "/bin/false",
+    GIT_TEMPLATE_DIR: machineTemplate(),
+    GIT_DIR: join(WORK, "machine-elsewhere.git"),
+    GIT_WORK_TREE: join(WORK, "machine-elsewhere"),
+    GIT_INDEX_FILE: join(WORK, "machine-elsewhere.index"),
+    GIT_OBJECT_DIRECTORY: join(WORK, "machine-objects"),
+  };
+  const saved = new Map(Object.keys(hostile).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, hostile);
+
+  try {
+    const dir = machineRepo("machine-hostile");
+    const setting = (key) => gitAt(dir, ["config", "--get", key], { allowFail: true }).stdout.trim();
+    const machineKeys = [
+      "diff.renames",
+      "diff.interHunkContext",
+      "diff.noprefix",
+      "diff.external",
+      "core.quotepath",
+      "core.hooksPath",
+    ];
+    for (const key of machineKeys) {
+      check.eq(setting(key), "", `${key} does not reach the fixture`);
+    }
+    check.eq(setting("user.name"), "Code Review Self Test", "the fixture's own identity wins");
+    check.eq(setting("core.autocrlf"), "false", "the fixture's own core.autocrlf wins");
+    check.eq(gitOut(dir, ["rev-parse", "--git-dir"]), ".git", "the fixture uses its own git folder");
+    for (const stray of ["machine-elsewhere.git", "machine-elsewhere", "machine-elsewhere.index", "machine-objects"]) {
+      check.eq(existsSync(join(WORK, stray)), false, `nothing was written to ${stray}`);
+    }
+
+    const text = protectedDiff(dir, ["-U10", "master", "feature"], { encoding: "latin1" });
+    const parsed = parseDiff(text);
+    check.none(checkParse(parsed), "checkParse");
+    check.has(text, "diff --git a/src/blocks.txt b/src/blocks.txt", "the a/ and b/ prefixes survive");
+    check.has(text, "caf\\303\\251", "the quoted-path coverage survives");
+    const byPath = new Map(parsed.files.map((file) => [file.path, file]));
+    check.eq(byPath.get("src/blocks.txt")?.hunks.length, 4, "hunks ten lines apart stay apart");
+    check.eq(byPath.get("src/moved.txt")?.status, "R", "the rename is still a rename");
+    check.eq(byPath.get("src/moved.txt")?.oldPath, "src/move me.txt", "the rename old path");
+    check.has(byPath.get("src/crlf.txt")?.text ?? "", "+TWO\r\n", "the carriage returns survive");
+
+    // The CLI is a child of this process, so it inherits the same environment.
+    const before = snapshot(dir);
+    const out = jsonOut(check, review(dir, ["prep"]), "prep");
+    unchanged(check, before, snapshot(dir), "prep under the machine's environment");
+    if (!out) return;
+    check.eq(out.totalChanged, parsed.totals.changed, "the reported total is the total in the protected diff");
+    check.deep(
+      out.files.map((file) => `${file.path}:${file.status}`).sort(),
+      parsed.files.map((file) => `${file.path}:${file.status}`).sort(),
+      "the reported records are the records in the protected diff",
+    );
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
 // diff.mjs cases
 // ---------------------------------------------------------------------------
 
 test("diff: every record type of a real git diff", (check) => {
   const dir = zooRepo("diff-zoo");
-  const text = gitAt(dir, ["diff", "--no-color", "-U10", "master", "feature"], { encoding: "latin1" }).stdout;
+  const text = protectedDiff(dir, ["-U10", "master", "feature"], { encoding: "latin1" });
   const parsed = parseDiff(text);
 
   check.deep(parsed.warnings, [], "warnings");
@@ -696,7 +882,7 @@ test("diff: every record type of a real git diff", (check) => {
 
   // Cross-check the counts against git rather than against ourselves.
   let counted = 0;
-  for (const line of gitAt(dir, ["diff", "--numstat", "master", "feature"]).stdout.split("\n")) {
+  for (const line of protectedDiff(dir, ["--numstat", "master", "feature"]).split("\n")) {
     const found = /^(\d+)\t(\d+)\t/.exec(line);
     if (found) counted += Number(found[1]) + Number(found[2]);
   }
@@ -1108,8 +1294,7 @@ test("prep: a base behind its tracking ref warns", (check) => {
 
   const clone = join(WORK, "prep-clone");
   gitAt(WORK, ["clone", "-q", origin, clone]);
-  gitAt(clone, ["config", "user.email", "selftest@example.invalid"]);
-  gitAt(clone, ["config", "user.name", "Code Review Self Test"]);
+  harden(clone);
   gitAt(clone, ["checkout", "-q", "-b", "feature"]);
   put(clone, "src/new.js", lines("new", 7));
   commitAll(clone, "feature work");
