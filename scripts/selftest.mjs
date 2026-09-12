@@ -1050,6 +1050,39 @@ test("diff: three equal units of 500 need three slices at target 800", (check) =
   for (const slice of plan.slices) check.eq(slice.changed, 500, `${slice.id} changed lines`);
 });
 
+test("diff: equally empty slices are broken by folder, and balance still wins", (check) => {
+  const tie = parseDiff(
+    addedFileDiff("a/large.txt", 600) + addedFileDiff("x/large.txt", 600) + addedFileDiff("x/small.txt", 200),
+  );
+  const tiePlan = planSlices({ files: tie.files, target: 1000 });
+  check.none(checkParse(tie), "checkParse");
+  check.none(checkPlan(tie, tiePlan), "checkPlan");
+  check.deep(
+    tiePlan.slices.map((slice) => slice.parts.map((part) => part.file.path)),
+    [["a/large.txt"], ["x/large.txt", "x/small.txt"]],
+    "the two x/ files share a slice",
+  );
+  check.deep(
+    tiePlan.slices.map((slice) => slice.changed),
+    [600, 800],
+    "the same sizes the folder-blind packer gave",
+  );
+
+  // Folder affinity only settles a tie. A fuller same-folder slice has to lose
+  // to an emptier slice from another folder, or balance is sacrificed for it.
+  const uneven = parseDiff(
+    addedFileDiff("x/big.txt", 700) + addedFileDiff("b/mid.txt", 500) + addedFileDiff("x/tiny.txt", 100),
+  );
+  const unevenPlan = planSlices({ files: uneven.files, target: 1000 });
+  check.none(checkPlan(uneven, unevenPlan), "checkPlan on the uneven fixture");
+  check.deep(
+    unevenPlan.slices.map((slice) => slice.parts.map((part) => part.file.path)),
+    [["x/big.txt"], ["b/mid.txt", "x/tiny.txt"]],
+    "the emptier slice beats the one sharing the folder",
+  );
+  check.deep(unevenPlan.slices.map((slice) => slice.changed), [700, 600], "balance is kept");
+});
+
 test("diff: seven files at target 100 give seven slices in three batches", (check) => {
   let text = "";
   for (let n = 1; n <= 7; n += 1) text += addedFileDiff(`src/file-${n}.txt`, 100);

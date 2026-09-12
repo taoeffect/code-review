@@ -387,26 +387,39 @@ export function planSlices({ files, target = DEFAULT_TARGET }) {
 
   units.sort(byWorkThenPlace);
   const bins = [];
+  const openBin = (unit) => {
+    bins.push({ units: [unit], changed: unit.changed, folders: new Set([unit.folder]) });
+  };
   for (const unit of units) {
     if (unit.oversized) {
-      bins.push({ units: [unit], changed: unit.changed });
+      openBin(unit);
       continue;
     }
-    // The emptiest slice that still has room for the whole unit.
+    // The emptiest slice that still has room for the whole unit. Two equally
+    // empty slices are separated by folder: one that already holds the unit's
+    // folder wins, so related files reach one reviewer. Balance still comes
+    // first, because a fuller slice never wins on folder alone.
     let roomy = null;
+    let roomyShares = false;
     for (const bin of bins) {
       if (bin.changed + unit.changed > target) continue;
-      if (roomy === null || bin.changed < roomy.changed) roomy = bin;
+      if (roomy !== null && bin.changed > roomy.changed) continue;
+      const shares = bin.folders.has(unit.folder);
+      if (roomy === null || bin.changed < roomy.changed || (shares && !roomyShares)) {
+        roomy = bin;
+        roomyShares = shares;
+      }
     }
     if (roomy) {
       roomy.units.push(unit);
       roomy.changed += unit.changed;
+      roomy.folders.add(unit.folder);
     } else {
       // Nothing has room, so open a slice rather than push one over the target.
       // `unitsFor` already cut every unit down to the target, so a fresh slice
       // always fits it. That is what makes "every slice is within the target,
       // unless one hunk alone beats it" true, and `checkPlan` proves it.
-      bins.push({ units: [unit], changed: unit.changed });
+      openBin(unit);
     }
   }
 
@@ -430,26 +443,28 @@ export function planSlices({ files, target = DEFAULT_TARGET }) {
 }
 
 // A unit is the smallest thing an allocator may move: a whole file, or one run
-// of hunks from a file too big to keep whole.
+// of hunks from a file too big to keep whole. `folder` is carried on the unit
+// because both the sort and the allocation loop read it for every comparison.
 function unitsFor(files, target) {
   const units = [];
   for (const file of files) {
+    const folder = folderOf(file.path);
     if (file.hunks.length === 0 || file.changed <= target) {
-      units.push({ file, hunks: file.hunks, changed: file.changed, oversized: false });
+      units.push({ file, folder, hunks: file.hunks, changed: file.changed, oversized: false });
       continue;
     }
     let group = [];
     let groupChanged = 0;
     const flush = () => {
       if (group.length === 0) return;
-      units.push({ file, hunks: group, changed: groupChanged, oversized: false });
+      units.push({ file, folder, hunks: group, changed: groupChanged, oversized: false });
       group = [];
       groupChanged = 0;
     };
     for (const hunk of file.hunks) {
       if (hunk.changed > target) {
         flush();
-        units.push({ file, hunks: [hunk], changed: hunk.changed, oversized: true });
+        units.push({ file, folder, hunks: [hunk], changed: hunk.changed, oversized: true });
         continue;
       }
       if (groupChanged + hunk.changed > target) flush();
@@ -465,9 +480,7 @@ function unitsFor(files, target) {
 // sized work from one folder tends to land in one slice.
 function byWorkThenPlace(left, right) {
   if (left.changed !== right.changed) return right.changed - left.changed;
-  const leftDir = folderOf(left.file.path);
-  const rightDir = folderOf(right.file.path);
-  if (leftDir !== rightDir) return leftDir < rightDir ? -1 : 1;
+  if (left.folder !== right.folder) return left.folder < right.folder ? -1 : 1;
   if (left.file.index !== right.file.index) return left.file.index - right.file.index;
   return firstHunkIndex(left) - firstHunkIndex(right);
 }
