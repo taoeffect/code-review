@@ -1842,6 +1842,27 @@ test("split: an unreadable hunk header stops the run", (check) => {
   unchanged(check, before, snapshot(dir), "a failed self-check");
 });
 
+test("split: a diff with no sliceable content stops the run", (check) => {
+  const dir = simpleRepo("split-unsliceable");
+  const prepped = jsonOut(check, review(dir, ["prep"]), "prep");
+  if (!prepped) return;
+  const before = snapshot(dir);
+
+  // The other two exit 6 cases feed diffs that still parse into file sections.
+  // A combined diff parses into none, so the plan holds zero slices and the run
+  // would read as an empty branch if the self-check ever ran after the "no file
+  // sections" branch instead of before it. The changed lines are real and sit
+  // outside every record, so no slice would carry them.
+  writeFileSync(join(prepped.runDir, "full.diff"), COMBINED_DIFF);
+  const result = review(dir, ["split", "--run-dir", prepped.runDir]);
+  failedRun(check, result, 6, "split on a diff it cannot slice");
+  check.has(result.stderr, 'diff content before the first "diff --git" line', "the content is named");
+  check.has(result.stderr, "Nothing was reviewed", "it says nothing was reviewed");
+  check.eq(sliceFilesOnDisk(prepped.runDir), null, "no slices were written");
+  check.eq(existsSync(join(prepped.runDir, "manifest.json")), false, "no manifest was written");
+  unchanged(check, before, snapshot(dir), "a failed self-check");
+});
+
 test("split: usage faults and a run folder with no full.diff", (check) => {
   const dir = simpleRepo("split-usage");
   const prepped = jsonOut(check, review(dir, ["prep"]), "prep");
