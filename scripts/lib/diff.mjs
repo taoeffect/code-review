@@ -26,7 +26,10 @@ export const SLICE_DIR = "slices";
 
 const FILE_START = "diff --git ";
 const HUNK_START = "@@";
-const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/;
+// Only the three numbers something reads are captured: 1 old line count, 2 new
+// start, 3 new line count. The old start and the section heading are matched
+// and thrown away, so no caller pays for a string it never asks for.
+const HUNK_HEADER = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@.*$/;
 
 /**
  * Read a `git diff` byte string, as the file header describes.
@@ -47,11 +50,10 @@ const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/;
  *    is `null`.
  *
  * Each hunk record is
- * `{ index, headerLine, headerUnreadable, text, heading, oldStart, oldLines,
- *    newStart, newLines, added, deleted, context, changed, countedOld,
- *    countedNew }`, where `headerUnreadable` says the `@@` line did not match
- *    the unified-diff shape, so every count here is a guess and `checkParse`
- *    reports it.
+ * `{ index, headerLine, headerUnreadable, text, oldLines, newStart, newLines,
+ *    added, deleted, context, changed, countedOld, countedNew }`, where
+ *    `headerUnreadable` says the `@@` line did not match the unified-diff
+ *    shape, so every count here is a guess and `checkParse` reports it.
  */
 export function parseDiff(source) {
   const cursor = new Cursor(source);
@@ -122,8 +124,8 @@ function parseHunk(cursor, index, warnings) {
   const start = cursor.pos;
   const headerLine = cursor.take();
   const found = HUNK_HEADER.exec(headerLine);
-  const oldLines = found ? optionalCount(found[2]) : 0;
-  const newLines = found ? optionalCount(found[4]) : 0;
+  const oldLines = found ? optionalCount(found[1]) : 0;
+  const newLines = found ? optionalCount(found[3]) : 0;
 
   let remainingOld = oldLines;
   let remainingNew = newLines;
@@ -171,10 +173,8 @@ function parseHunk(cursor, index, warnings) {
     headerLine,
     headerUnreadable: found === null,
     text: cursor.source.slice(start, cursor.pos),
-    heading: found ? found[5] : "",
-    oldStart: found ? Number(found[1]) : 0,
     oldLines,
-    newStart: found ? Number(found[3]) : 0,
+    newStart: found ? Number(found[2]) : 0,
     newLines,
     added,
     deleted,
