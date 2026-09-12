@@ -12,8 +12,8 @@
 //
 //   node scripts/selftest.mjs [--only <text>] [--keep]
 //
-// `--only` runs the cases whose name holds that text. `--keep` leaves the temp
-// folder in place for inspection.
+// `--only` runs the cases whose name holds that text, and needs a value.
+// `--keep` leaves the temp folder in place for inspection.
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -51,16 +51,29 @@ import { DIFF_CONFIG, DIFF_FLAGS } from "./lib/git.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = join(HERE, "review.mjs");
+const SELF = fileURLToPath(import.meta.url);
 const ARGV = process.argv.slice(2);
-const ONLY = flagValue("--only");
+const ONLY = chooseOnly(ARGV);
 const KEEP = ARGV.includes("--keep");
 
 const MARKER = ".code-review-run";
 const RUN_ROOT = join(".git", "code-review");
 
-function flagValue(name) {
-  const at = ARGV.indexOf(name);
-  return at === -1 ? null : (ARGV[at + 1] ?? null);
+/**
+ * What `--only` was given: `{ ok: true, text }`, where `text` is `null` for no
+ * filter, or `{ ok: false, problem }`. A missing value must not read as "no
+ * filter": `--only` on its own then runs the whole suite while the caller
+ * believes one case was chosen, and `--only --keep` filters by the name of the
+ * next flag and chooses nothing.
+ */
+function chooseOnly(argv) {
+  const at = argv.indexOf("--only");
+  if (at === -1) return { ok: true, text: null };
+  const value = argv[at + 1];
+  if (value === undefined || value.startsWith("--")) {
+    return { ok: false, problem: "--only needs a value: the text a case name holds." };
+  }
+  return { ok: true, text: value };
 }
 
 // ---------------------------------------------------------------------------
@@ -937,6 +950,34 @@ test("harness: the machine's git config and environment cannot reach a fixture",
       else process.env[key] = value;
     }
   }
+});
+
+// The runner's own argument handling. A filter that is silently dropped is
+// worse than a fault: the caller reads a green whole-suite run as proof about
+// the one case they meant to name.
+test("harness: --only needs a value", (check) => {
+  check.eq(chooseOnly([]).text, null, "no --only is no filter");
+  check.eq(chooseOnly(["--keep"]).text, null, "another flag alone is no filter");
+  check.eq(chooseOnly(["--only", "prep:"]).text, "prep:", "a value is the filter text");
+  check.eq(chooseOnly(["--only", "--keep"]).ok, false, "the next flag is not a value");
+  check.eq(chooseOnly(["--only"]).ok, false, "the last argument has no value after it");
+
+  const runner = (args) => {
+    const result = spawnSync(process.execPath, [SELF, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    if (result.error) throw result.error;
+    return { code: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+  };
+
+  // `--keep` is in this argv on purpose: any path that reaches the temp folder
+  // prints `kept <dir>`, so the empty stdout is also the proof that the fault
+  // was answered before anything was created.
+  const faulted = runner(["--only", "--keep"]);
+  failedRun(check, faulted, 1, "--only --keep");
+  check.has(faulted.stderr, "--only needs a value", "the reason names the option");
+
+  const filtered = runner(["--only", "diff: an empty diff plans zero slices"]);
+  check.eq(filtered.code, 0, `a real filter still runs (stderr: ${clip(filtered.stderr)})`);
+  check.has(filtered.stdout, "\n1 case(s), 0 failed", "a real filter chooses that one case");
 });
 
 // ---------------------------------------------------------------------------
@@ -2489,6 +2530,13 @@ function requireGit() {
 }
 
 function main() {
+  // Before the temp folder, so a usage fault creates nothing and leaves stdout
+  // empty.
+  if (!ONLY.ok) {
+    process.stderr.write(`${ONLY.problem}\n`);
+    return 1;
+  }
+
   const gitProblem = requireGit();
   if (gitProblem) {
     process.stderr.write(`${gitProblem}\n`);
@@ -2496,7 +2544,7 @@ function main() {
   }
 
   WORK = realpathSync(mkdtempSync(join(tmpdir(), "code-review-selftest-")));
-  const chosen = cases.filter((entry) => ONLY === null || entry.name.includes(ONLY));
+  const chosen = cases.filter((entry) => ONLY.text === null || entry.name.includes(ONLY.text));
   let failed = 0;
   const started = Date.now();
 
@@ -2527,7 +2575,9 @@ function main() {
   const took = ((Date.now() - started) / 1000).toFixed(1);
   process.stdout.write(`\n${chosen.length} case(s), ${failed} failed, ${took} s\n`);
   if (chosen.length === 0) {
-    process.stderr.write(ONLY === null ? "no cases are registered.\n" : `no case name holds ${JSON.stringify(ONLY)}.\n`);
+    process.stderr.write(
+      ONLY.text === null ? "no cases are registered.\n" : `no case name holds ${JSON.stringify(ONLY.text)}.\n`,
+    );
     return 1;
   }
   return failed === 0 ? 0 : 1;
