@@ -260,9 +260,15 @@ function split(args) {
 
   const runDir = resolveManagedRun(flags.runDir);
   const diffFile = join(runDir, "full.diff");
+  // `latin1` maps every byte to one character and back, so a diff of Latin-1,
+  // CP1252, or Shift-JIS source keeps its exact bytes on the way through. Read
+  // as `utf8`, every byte that is not valid UTF-8 would come back as U+FFFD and
+  // the slices would no longer match the source they are reviewed against.
+  // `scripts/lib/diff.mjs` reads this string as bytes and decodes the paths it
+  // reports itself.
   let source;
   try {
-    source = readFileSync(diffFile, "utf8");
+    source = readFileSync(diffFile, "latin1");
   } catch {
     throw new ReviewError(`${diffFile} is missing, so this run folder is not a finished prep.`);
   }
@@ -286,9 +292,9 @@ function split(args) {
   for (const slice of plan.slices) {
     const text = sliceText(slice);
     const path = join(runDir, slice.path);
-    writeFileSync(path, text);
+    writeFileSync(path, text, "latin1");
     const written = statSync(path).size;
-    const expected = Buffer.byteLength(text);
+    const expected = Buffer.byteLength(text, "latin1");
     if (written !== expected) writeProblems.push(`${slice.path}: wrote ${written} bytes, expected ${expected}`);
   }
   if (writeProblems.length > 0) return reportProblems("Writing the slices", writeProblems);

@@ -131,10 +131,10 @@ function clip(text, limit = 400) {
 
 let WORK = "";
 
-function gitAt(cwd, args, { env = {}, allowFail = false } = {}) {
+function gitAt(cwd, args, { env = {}, allowFail = false, encoding = "utf8" } = {}) {
   const result = spawnSync("git", args, {
     cwd,
-    encoding: "utf8",
+    encoding,
     maxBuffer: 64 * 1024 * 1024,
     env: { ...process.env, ...env },
   });
@@ -199,6 +199,13 @@ function put(dir, path, content) {
 }
 
 const del = (dir, path) => rmSync(join(dir, path), { recursive: true, force: true });
+
+/**
+ * Diff text the way the CLI reads it: one character per byte. `parseDiff` takes
+ * a byte string, so a `utf8` read here would decode the paths a second time and
+ * turn every byte that is not valid UTF-8 into U+FFFD.
+ */
+const readDiff = (path) => readFileSync(path, "latin1");
 
 function commitAll(dir, message, { allowEmpty = false } = {}) {
   gitAt(dir, ["add", "-A"]);
@@ -328,6 +335,46 @@ function zooRepo(name) {
   return dir;
 }
 
+/** "caf<0xE9> latin1": a Latin-1 or CP1252 source line git still calls text. */
+const LATIN1_WORD = Buffer.from([0x63, 0x61, 0x66, 0xe9]);
+const REPLACEMENT = Buffer.from("\uFFFD");
+/** The octal escape git writes for 中 when `core.quotepath` is on. */
+const CHINESE_OCTAL = Buffer.from("\\344\\270\\255");
+
+/**
+ * Names the parser has to hand back as text: four scripts, a space beside an
+ * emoji so the unquoted `diff --git` line is ambiguous, and a tab that git
+ * quotes whatever `core.quotepath` says. The binary file has no `---` and `+++`
+ * pair, so its path can only come from the `diff --git` line.
+ */
+const ODD_NAMES = [
+  "src/latin1.txt",
+  "src/🚀 rocket.txt",
+  "src/中文.txt",
+  "src/日本語.txt",
+  "src/한국어.txt",
+  "src/tab\there.txt",
+  "src/データ file.dat",
+];
+
+/** A diff holding a byte that is not valid UTF-8, and the names above. */
+function encodingRepo(name, { quotePath }) {
+  const dir = newRepo(name);
+  gitAt(dir, ["config", "core.quotepath", quotePath ? "true" : "false"]);
+  put(dir, "src/latin1.txt", "base\n");
+  put(dir, "src/データ file.dat", Buffer.from([0, 1, 2, 3, 0, 255, 7]));
+  commitAll(dir, "base commit");
+
+  gitAt(dir, ["checkout", "-q", "-b", "feature"]);
+  put(dir, "src/latin1.txt", Buffer.concat([Buffer.from("base\n"), LATIN1_WORD, Buffer.from(" latin1\n")]));
+  put(dir, "src/データ file.dat", Buffer.from([0, 9, 9, 9, 0, 1, 2, 3]));
+  for (const path of ODD_NAMES) {
+    if (path !== "src/latin1.txt" && !path.endsWith(".dat")) put(dir, path, `hello ${basename(path)}\n`);
+  }
+  commitAll(dir, "one odd byte and several odd names");
+  return dir;
+}
+
 // ---------------------------------------------------------------------------
 // Handmade diff fixtures
 // ---------------------------------------------------------------------------
@@ -450,11 +497,11 @@ const sliceTotal = (manifest) => manifest.slices.reduce((sum, slice) => sum + sl
  * `manifest.json` records, and only then compared.
  */
 function checkRebuild(check, runDir, manifest, label) {
-  const diff = parseDiff(readFileSync(join(runDir, "full.diff"), "utf8"));
+  const diff = parseDiff(readDiff(join(runDir, "full.diff")));
   const original = new Map(diff.files.map((file) => [file.path, file]));
   const found = new Map();
   for (const slice of manifest.slices) {
-    const parsed = parseDiff(readFileSync(join(runDir, slice.path), "utf8"));
+    const parsed = parseDiff(readDiff(join(runDir, slice.path)));
     check.none(checkParse(parsed), `${label}: ${slice.id} does not parse cleanly`);
     for (const file of parsed.files) {
       const record = found.get(file.path) ?? { header: file.header, hunks: [] };
@@ -531,7 +578,7 @@ function sliceFilesOnDisk(runDir) {
 
 test("diff: every record type of a real git diff", (check) => {
   const dir = zooRepo("diff-zoo");
-  const text = gitAt(dir, ["diff", "--no-color", "-U10", "master", "feature"]).stdout;
+  const text = gitAt(dir, ["diff", "--no-color", "-U10", "master", "feature"], { encoding: "latin1" }).stdout;
   const parsed = parseDiff(text);
 
   check.deep(parsed.warnings, [], "warnings");
@@ -579,6 +626,10 @@ test("diff: unquotePath undoes git quoting", (check) => {
   check.eq(unquotePath("a/src/with space.txt\t"), "a/src/with space.txt", "trailing tab");
   check.eq(unquotePath('"a/src/caf\\303\\251.txt"'), "a/src/café.txt", "octal UTF-8");
   check.eq(unquotePath('"a/x\\"y\\\\z\\t.txt"'), 'a/x"y\\z\t.txt', "quote, backslash, and tab escapes");
+  // `core.quotepath=false` leaves the UTF-8 bytes of a name raw, quoted or not,
+  // and the input is one character per byte, so "\u00c3\u00a9" is the é of café.
+  check.eq(unquotePath("a/src/caf\u00c3\u00a9.txt"), "a/src/café.txt", "raw UTF-8 bytes, unquoted");
+  check.eq(unquotePath('"a/src/caf\u00c3\u00a9 \\"q\\".txt"'), 'a/src/café "q".txt', "raw UTF-8 bytes, quoted");
 });
 
 test("diff: CRLF body and an empty body line", (check) => {
@@ -795,7 +846,7 @@ test("prep: a normal branch", (check) => {
     "files",
   );
 
-  const parsed = parseDiff(readFileSync(out.diffFile, "utf8"));
+  const parsed = parseDiff(readDiff(out.diffFile));
   check.deep(parsed.warnings, [], "full.diff warnings");
   check.none(checkParse(parsed), "full.diff checkParse");
   check.eq(parsed.totals.changed, out.totalChanged, "full.diff total against the JSON");
@@ -1176,7 +1227,7 @@ test("split: every record type appears in exactly one slice", (check) => {
   check.ok(zeroChanged.length >= 3, `records with no hunks: ${clip(zeroChanged.join(", "))}`);
   for (const path of zeroChanged) check.eq(counts.get(path), 1, `${path}: a record with no hunks still gets a slice`);
 
-  const written = manifest.slices.map((slice) => readFileSync(join(prepped.runDir, slice.path), "utf8")).join("");
+  const written = manifest.slices.map((slice) => readDiff(join(prepped.runDir, slice.path))).join("");
   check.has(written, "+TWO\r\n", "the written slices keep carriage returns");
   check.has(written, "\\ No newline at end of file", "the written slices keep the no-newline marker");
   check.has(written, "Binary files", "the binary record was written");
@@ -1184,6 +1235,39 @@ test("split: every record type appears in exactly one slice", (check) => {
   check.has(written, "old mode 100644", "the mode-only record was written");
   checkReverseApply(check, prepped.runDir, manifest, "split");
 });
+
+// `core.quotepath` decides whether git escapes a non-ASCII path as octal or
+// writes its bytes raw, and the two forms are read by different branches of the
+// parser, so both settings get a case. A name holding a tab is quoted either
+// way.
+for (const quotePath of [true, false]) {
+  test(`split: non-UTF-8 bytes and non-ASCII names survive core.quotepath=${quotePath}`, (check) => {
+    const dir = encodingRepo(`split-encoding-${quotePath}`, { quotePath });
+    const before = snapshot(dir);
+    const prepped = jsonOut(check, review(dir, ["prep"]), "prep");
+    if (!prepped) return;
+
+    // One changed line per file, so every file is whole in exactly one slice.
+    const manifest = jsonOut(check, review(dir, ["split", "--run-dir", prepped.runDir, "--target", "1"]), "split");
+    unchanged(check, before, snapshot(dir), "prep and split");
+    if (!manifest) return;
+
+    const full = readFileSync(prepped.diffFile);
+    check.eq(full.includes(CHINESE_OCTAL), quotePath, "core.quotepath decides how git writes the names");
+    check.ok(full.includes(LATIN1_WORD), "full.diff holds the latin1 byte");
+
+    const written = Buffer.concat(manifest.slices.map((slice) => readFileSync(join(prepped.runDir, slice.path))));
+    check.ok(written.includes(LATIN1_WORD), "the slices keep the latin1 byte");
+    check.ok(!written.includes(REPLACEMENT), "no slice holds a replacement character");
+    // Each file section is written once, so equal length plus the rebuild check
+    // below means the cut moved every byte and invented none.
+    check.eq(written.length, full.length, "slice bytes against full.diff bytes");
+
+    check.deep([...fileCounts(manifest).keys()].sort(), [...ODD_NAMES].sort(), "manifest file names");
+    checkRebuild(check, prepped.runDir, manifest, "split");
+    checkReverseApply(check, prepped.runDir, manifest, "split");
+  });
+}
 
 test("split: an empty diff writes no slices", (check) => {
   const dir = newRepo("split-empty");

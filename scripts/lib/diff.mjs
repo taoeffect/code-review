@@ -5,6 +5,14 @@
 // dropped instead of hoping. Every record keeps its own slice of the source
 // text, which V8 shares with the parent string rather than copying.
 //
+// The source text is a byte string: one character per byte of the diff, as
+// `readFileSync(path, "latin1")` produces. A diff can hold bytes that are not
+// valid UTF-8, because git writes a textual diff for any source file it does
+// not call binary, whatever encoding that file uses. Decoding such a diff would
+// replace those bytes with U+FFFD and the slices would stop matching the source
+// under review. So patch text stays raw here, and only the paths this module
+// reports are decoded as UTF-8, exactly once, in `unquotePath`.
+//
 // This file is pure. It never reads a file and it never calls git.
 
 /** Changed lines we aim for in one slice. */
@@ -21,7 +29,7 @@ const HUNK_START = "@@";
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/;
 
 /**
- * Read a `git diff` text.
+ * Read a `git diff` byte string, as the file header describes.
  *
  * Returns `{ source, preamble, files, totals, warnings }`. `preamble` holds any
  * text before the first `diff --git` line and is normally empty. A text with no
@@ -30,7 +38,8 @@ const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/;
  *
  * Each file record is
  * `{ index, path, oldPath, newPath, status, binary, modeOnly, renameOnly,
- *    header, text, hunks, added, deleted, changed }`.
+ *    header, text, hunks, added, deleted, changed }`, where `path`, `oldPath`,
+ *    and `newPath` are decoded text and `header` and `text` are raw bytes.
  *
  * Each hunk record is
  * `{ index, headerLine, text, heading, oldStart, oldLines, newStart, newLines,
@@ -235,7 +244,7 @@ function parseFileStartLine(line, warnings) {
     const left = rest.slice(0, at);
     const right = rest.slice(at + 1);
     if (left.startsWith("a/") && left.slice(2) === right.slice(2)) {
-      return { oldPath: left.slice(2), newPath: right.slice(2) };
+      return { oldPath: sidePath(left), newPath: sidePath(right) };
     }
   }
   const last = rest.lastIndexOf(" b/");
@@ -253,21 +262,28 @@ function stripSidePrefix(path) {
 const C_ESCAPES = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11, "\\": 92, '"': 34 };
 const utf8Decoder = new TextDecoder();
 const utf8Encoder = new TextEncoder();
+const ASCII_ONLY = /^[\x00-\x7f]*$/;
 
 /**
- * Undo the quoting git puts on a path. Git quotes a path that holds a control
- * character, a double quote, a backslash, or a byte above ASCII, and writes the
- * bytes as octal escapes. An unquoted path that holds a space gets a trailing
- * tab on the `---` and `+++` lines instead.
+ * Undo the quoting git puts on a path, and give back text. Git quotes a path
+ * that holds a control character, a double quote, a backslash, or a byte above
+ * ASCII, and writes the bytes as octal escapes. An unquoted path that holds a
+ * space gets a trailing tab on the `---` and `+++` lines instead.
+ *
+ * `raw` is a byte string, as the file header describes, so an unquoted path
+ * carries its UTF-8 bytes one per character. Both forms therefore end the same
+ * way: recover the bytes, then decode them as UTF-8 exactly once. With
+ * `core.quotepath=false` git leaves those bytes raw even inside a quoted path,
+ * which is why the quoted branch reads them as bytes too.
  */
 export function unquotePath(raw) {
-  if (!raw.startsWith('"')) return raw.endsWith("\t") ? raw.slice(0, -1) : raw;
+  if (!raw.startsWith('"')) return decodeBytes(raw.endsWith("\t") ? raw.slice(0, -1) : raw);
   const inner = raw.slice(1, quotedEnd(raw));
   const bytes = [];
   for (let at = 0; at < inner.length; at += 1) {
     const char = inner[at];
     if (char !== "\\") {
-      pushUtf8(bytes, char);
+      pushByte(bytes, char);
       continue;
     }
     const escape = inner[at + 1];
@@ -283,15 +299,26 @@ export function unquotePath(raw) {
       continue;
     }
     const known = C_ESCAPES[escape];
-    if (known === undefined) pushUtf8(bytes, escape);
+    if (known === undefined) pushByte(bytes, escape);
     else bytes.push(known);
   }
   return utf8Decoder.decode(new Uint8Array(bytes));
 }
 
-function pushUtf8(bytes, char) {
-  const code = char.charCodeAt(0);
-  if (code < 0x80) bytes.push(code);
+// An ASCII path is already text, and every path in a diff normally is one, so
+// the byte walk below is skipped for it.
+function decodeBytes(text) {
+  if (ASCII_ONLY.test(text)) return text;
+  const bytes = [];
+  for (const char of text) pushByte(bytes, char);
+  return utf8Decoder.decode(new Uint8Array(bytes));
+}
+
+// A character above 0xff cannot come from a byte string. It can only come from a
+// caller that decoded its input itself, so keep its own UTF-8 bytes.
+function pushByte(bytes, char) {
+  const code = char.codePointAt(0);
+  if (code <= 0xff) bytes.push(code);
   else for (const byte of utf8Encoder.encode(char)) bytes.push(byte);
 }
 
