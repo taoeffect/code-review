@@ -191,6 +191,10 @@ function parseHunk(cursor, index, warnings) {
 // name both sides even when one side does not exist, so an added or a deleted
 // section has its missing side taken back out: `/dev/null` is what the `---` and
 // `+++` lines would have said.
+//
+// A rename or copy line is the one source that carries no side prefix: git
+// writes the plain repository path there. Stripping one would eat the first
+// folder of a file that really lives under `a/` or `b/`.
 function readHeaderFacts(headerLines) {
   let status = "M";
   let binary = false;
@@ -226,8 +230,8 @@ function readHeaderFacts(headerLines) {
   let newPath = fromLine.newPath;
   if (oldSide !== null) oldPath = sidePath(oldSide);
   if (newSide !== null) newPath = sidePath(newSide);
-  if (renameFrom !== null) oldPath = stripSidePrefix(renameFrom);
-  if (renameTo !== null) newPath = stripSidePrefix(renameTo);
+  if (renameFrom !== null) oldPath = renameFrom;
+  if (renameTo !== null) newPath = renameTo;
   if (status === "A" && oldSide === null) oldPath = null;
   if (status === "D" && newSide === null) newPath = null;
   return { status, binary, modeChanged, oldPath, newPath, pathsUnreadable: fromLine.unreadable };

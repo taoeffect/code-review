@@ -422,6 +422,35 @@ function zooRepo(name) {
 }
 
 /**
+ * Files that really live in top-level `a/` and `b/` folders: a pure rename
+ * inside `b/`, a rename with an edit inside `a/` whose old name holds a space,
+ * and a copy out of `a/` into `b/`.
+ *
+ * Git writes `rename from`, `rename to`, `copy from`, and `copy to` with the
+ * plain repository path and no side prefix, so these are the names a parser
+ * shortens if it strips one from those lines.
+ *
+ * The copy only shows with `--find-copies-harder`, because its source is
+ * unchanged. The CLI asks for renames alone, so through `prep` the copy is a
+ * plain addition.
+ */
+function sidePrefixRepo(name) {
+  const dir = newRepo(name);
+  put(dir, "a/edit me.txt", lines("edit", 20));
+  put(dir, "a/source.txt", lines("source", 6));
+  put(dir, "b/orig.txt", lines("kept", 6));
+  commitAll(dir, "base commit");
+
+  gitAt(dir, ["checkout", "-q", "-b", "feature"]);
+  gitAt(dir, ["mv", "a/edit me.txt", "a/edited.txt"]);
+  put(dir, "a/edited.txt", `${lines("edit", 10)}CHANGED\n${lines("edit", 9, 12)}`);
+  gitAt(dir, ["mv", "b/orig.txt", "b/moved.txt"]);
+  put(dir, "b/copy.txt", lines("source", 6));
+  commitAll(dir, "renames under a/ and b/");
+  return dir;
+}
+
+/**
  * Everything git can do to content on its way out of the object store: CRLF
  * endings from a `text eol=crlf` attribute, a UTF-16 working tree from
  * `working-tree-encoding`, a smudge filter that replaces the body and leaves a
@@ -1251,6 +1280,30 @@ test("diff: a copy-only section lands in exactly one slice", (check) => {
   check.eq(holders.length, 1, "slices holding the copy-only section");
 });
 
+// The rename and copy header lines are the one place in a diff that carries no
+// side prefix, so a file that really lives in a top-level `a/` or `b/` folder
+// is where stripping one loses the folder.
+test("diff: a rename or copy line keeps the whole path", (check) => {
+  const dir = sidePrefixRepo("diff-side-prefix");
+  const text = protectedDiff(dir, ["--find-copies-harder", "master", "feature"]);
+  check.has(text, "\nrename from b/orig.txt\n", "git names the rename source with no side prefix");
+  check.has(text, "\ncopy from a/source.txt\n", "git names the copy source with no side prefix");
+
+  const parsed = parseDiff(text);
+  check.deep(parsed.warnings, [], "warnings");
+  check.none(checkParse(parsed), "checkParse");
+
+  const byPath = new Map(parsed.files.map((file) => [file.path, file]));
+  check.deep([...byPath.keys()].sort(), ["a/edited.txt", "b/copy.txt", "b/moved.txt"], "paths");
+  check.eq(byPath.get("b/moved.txt")?.status, "R", "rename status");
+  check.eq(byPath.get("b/moved.txt")?.oldPath, "b/orig.txt", "a pure rename inside b/");
+  check.eq(byPath.get("b/copy.txt")?.status, "C", "copy status");
+  check.eq(byPath.get("b/copy.txt")?.oldPath, "a/source.txt", "a copy out of a/");
+  // This section has `---` and `+++` lines, and those were already right. The
+  // rename lines are read after them, so they have to be right as well.
+  check.eq(byPath.get("a/edited.txt")?.oldPath, "a/edit me.txt", "a rename with an edit inside a/");
+});
+
 // A plan is checked against the records it carries, not against index numbers
 // that happen to line up. Both doctored plans below would write a slice holding
 // another file's hunk under this file's header.
@@ -1983,6 +2036,33 @@ test("split: every record type appears in exactly one slice", (check) => {
   check.has(written, "rename from src/rename me.txt", "the rename record was written");
   check.has(written, "old mode 100644", "the mode-only record was written");
   checkReverseApply(check, prepped.runDir, manifest, "split");
+});
+
+// A reviewing agent reads `<sourceDir>/<path>` for context, so a path the
+// manifest shortens is a file that is not there.
+test("split: a path under a real a/ folder reaches the manifest whole", (check) => {
+  const dir = sidePrefixRepo("split-side-prefix");
+  const before = snapshot(dir);
+  const prepped = jsonOut(check, review(dir, ["prep"]), "prep");
+  if (!prepped) return;
+
+  const manifest = jsonOut(check, review(dir, ["split", "--run-dir", prepped.runDir, "--target", "4"]), "split");
+  unchanged(check, before, snapshot(dir), "prep and split");
+  if (!manifest) return;
+
+  const preppedOld = new Map(prepped.files.map((file) => [file.path, file.oldPath]));
+  check.deep([...preppedOld.keys()].sort(), ["a/edited.txt", "b/copy.txt", "b/moved.txt"], "prep paths");
+  check.eq(preppedOld.get("b/moved.txt"), "b/orig.txt", "prep names the rename source");
+  for (const slice of manifest.slices) {
+    for (const file of slice.files) {
+      if (!check.ok(preppedOld.has(file.path), `${file.path}: prep must hold the same record`)) continue;
+      check.eq(file.oldPath, preppedOld.get(file.path), `${file.path}: oldPath in the manifest against prep`);
+    }
+  }
+  for (const path of fileCounts(manifest).keys()) {
+    check.ok(existsSync(join(prepped.sourceDir, path)), `${path}: the snapshot holds the file the manifest names`);
+  }
+  checkRebuild(check, prepped.runDir, manifest, "split");
 });
 
 // `core.quotepath` decides whether git escapes a non-ASCII path as octal or
