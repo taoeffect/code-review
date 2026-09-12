@@ -182,10 +182,14 @@ const GIT_ENV = {
   GIT_ALTERNATE_OBJECT_DIRECTORIES: undefined,
 };
 
-function gitAt(cwd, args, { env = {}, allowFail = false, encoding = "utf8" } = {}) {
+// `input` must be a Buffer when it carries patch bytes: `spawnSync` encodes a
+// string `input` with the `encoding` option, so a latin1 byte string handed over
+// as text would go in as UTF-8 and every byte above 0x7f would change.
+function gitAt(cwd, args, { env = {}, allowFail = false, encoding = "utf8", input } = {}) {
   const result = spawnSync("git", args, {
     cwd,
     encoding,
+    input,
     maxBuffer: 64 * 1024 * 1024,
     env: { ...process.env, ...GIT_ENV, ...env },
   });
@@ -846,19 +850,41 @@ function checkRebuild(check, runDir, manifest, label) {
 /**
  * Every slice must undo cleanly against the merged source snapshot. That is an
  * independent witness that the fragments are real patches, not just text we cut
- * up. Binary sections are skipped: `git apply` refuses them without a full
- * index line, which a diff without `--binary` never carries.
+ * up.
+ *
+ * `git apply` refuses a binary section without a full index line, which a diff
+ * taken without `--binary` never carries, so a binary section is dropped from
+ * the patch and every other section of that slice still goes in. Skipping the
+ * whole slice instead left a text file packed beside a binary record with no
+ * witness at all, and a zero-line binary record packs freely at any target: in
+ * the zoo fixture at target 12 that was seven of the nine nonbinary records,
+ * the rename-only and mode-only ones among them.
+ *
+ * The rebuilt patch goes in on stdin, as bytes, because a slice can hold bytes
+ * that are not valid UTF-8.
+ *
+ * Returns the repository path of every section it proved, in manifest order, so
+ * a caller can name the coverage it expects.
  */
 function checkReverseApply(check, runDir, manifest, label) {
-  let checked = 0;
+  const covered = [];
   for (const slice of manifest.slices) {
-    if (slice.files.some((file) => file.binary)) continue;
-    const args = ["apply", "-R", "--check", "-p1", join(runDir, slice.path)];
-    const result = gitAt(manifest.sourceDir, args, { allowFail: true });
-    check.eq(result.code, 0, `${label}: ${slice.id} does not reverse-apply (${clip(result.stderr)})`);
-    checked += 1;
+    const parsed = parseDiff(readDiff(join(runDir, slice.path)));
+    const kept = parsed.files.filter((file) => !file.binary);
+    // `git apply` calls an empty patch a fault, so an all-binary slice is the
+    // one slice that still has nothing to witness.
+    if (kept.length === 0) continue;
+    const patch = Buffer.from(kept.map((file) => file.text).join(""), "latin1");
+    const args = ["apply", "-R", "--check", "-p1"];
+    const result = gitAt(manifest.sourceDir, args, { allowFail: true, input: patch });
+    if (!check.eq(result.code, 0, `${label}: ${slice.id} does not reverse-apply (${clip(result.stderr)})`)) continue;
+    covered.push(...kept.map((file) => file.path));
   }
-  check.ok(checked > 0, `${label}: no slice was reverse-applied`);
+  // The floor this replaced, "one slice was checked", passed while two thirds
+  // of the records went unproved.
+  const wanted = manifest.slices.flatMap((slice) => slice.files.filter((file) => !file.binary).map((file) => file.path));
+  check.deep([...covered].sort(), wanted.sort(), `${label}: the reverse-applied sections`);
+  return covered;
 }
 
 function sliceFilesOnDisk(runDir) {
@@ -2235,7 +2261,16 @@ test("split: every record type appears in exactly one slice", (check) => {
   check.has(written, "Binary files", "the binary record was written");
   check.has(written, "rename from src/rename me.txt", "the rename record was written");
   check.has(written, "old mode 100644", "the mode-only record was written");
-  checkReverseApply(check, prepped.runDir, manifest, "split");
+
+  // Only a binary section is beyond a reverse-apply. Every other record type
+  // the fixture holds, the rename-only and the mode-only one included, has to
+  // be proved a real patch, and both of those pack beside a binary record here.
+  const covered = new Set(checkReverseApply(check, prepped.runDir, manifest, "split"));
+  check.deep(
+    diff.files.filter((file) => !covered.has(file.path)).map((file) => file.path),
+    diff.files.filter((file) => file.binary).map((file) => file.path),
+    "the records no reverse-apply proves",
+  );
 });
 
 // A reviewing agent reads `<sourceDir>/<path>` for context, so a path the
