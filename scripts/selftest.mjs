@@ -460,6 +460,20 @@ const UNREADABLE_START_DIFF =
   "+TWO\n" +
   " three\n";
 
+// A hunk header no rule can read, with a real hunk after it. The counts of the
+// bad header are unknown, so its body lines belong to no count at all.
+const UNREADABLE_HUNK_DIFF =
+  "diff --git a/src/app.js b/src/app.js\n" +
+  "index 1111111..2222222 100644\n" +
+  "--- a/src/app.js\n" +
+  "+++ b/src/app.js\n" +
+  "@@@ -1,2 -1,2 +1,2 @@@\n" +
+  "@@ -9,3 +9,3 @@\n" +
+  " nine\n" +
+  "-ten\n" +
+  "+TEN\n" +
+  " eleven\n";
+
 const COMBINED_DIFF =
   "diff --cc src/merged.txt\n" +
   "index 1111111,2222222..3333333\n" +
@@ -692,6 +706,22 @@ test("diff: an unreadable file start line is a problem, not a warning", (check) 
   const problems = checkParse(parsed);
   check.eq(problems.length, 1, `problems: ${clip(problems.join(" | "))}`);
   check.has(problems[0] ?? "", "could not read the paths from: diff --git i/src/app.js w/src/app.js", "problem wording");
+});
+
+test("diff: an unreadable hunk header is a problem, not a warning", (check) => {
+  const parsed = parseDiff(UNREADABLE_HUNK_DIFF);
+  check.eq(parsed.files.length, 1, "file sections");
+  check.deep(parsed.warnings, [], "warnings");
+  check.eq(parsed.files[0].hunks.length, 2, "hunks");
+  check.eq(parsed.files[0].hunks[0].headerUnreadable, true, "headerUnreadable on the bad hunk");
+  check.eq(parsed.files[0].hunks[1].headerUnreadable, false, "headerUnreadable on the good hunk");
+  // The bad header promises nothing, so its counts agree with each other and
+  // the count check cannot catch it.
+  check.eq(parsed.files[0].hunks[0].countedOld, parsed.files[0].hunks[0].oldLines, "old counts agree");
+  check.eq(parsed.files[0].hunks[0].countedNew, parsed.files[0].hunks[0].newLines, "new counts agree");
+  const problems = checkParse(parsed);
+  check.eq(problems.length, 1, `problems: ${clip(problems.join(" | "))}`);
+  check.has(problems[0] ?? "", "src/app.js: unreadable hunk header: @@@ -1,2 -1,2 +1,2 @@@", "problem wording");
 });
 
 test("diff: a truncated diff with no final newline", (check) => {
@@ -1457,6 +1487,22 @@ test("split: an unreadable file start line stops the run", (check) => {
   const result = review(dir, ["split", "--run-dir", prepped.runDir]);
   failedRun(check, result, 6, "split on a diff whose file start line cannot be read");
   check.has(result.stderr, "could not read the paths from", "the unreadable line is named");
+  check.has(result.stderr, "Nothing was reviewed", "it says nothing was reviewed");
+  check.eq(sliceFilesOnDisk(prepped.runDir), null, "no slices were written");
+  check.eq(existsSync(join(prepped.runDir, "manifest.json")), false, "no manifest was written");
+  unchanged(check, before, snapshot(dir), "a failed self-check");
+});
+
+test("split: an unreadable hunk header stops the run", (check) => {
+  const dir = simpleRepo("split-unreadable-hunk");
+  const prepped = jsonOut(check, review(dir, ["prep"]), "prep");
+  if (!prepped) return;
+  const before = snapshot(dir);
+
+  writeFileSync(join(prepped.runDir, "full.diff"), UNREADABLE_HUNK_DIFF);
+  const result = review(dir, ["split", "--run-dir", prepped.runDir]);
+  failedRun(check, result, 6, "split on a diff whose hunk header cannot be read");
+  check.has(result.stderr, "unreadable hunk header: @@@ -1,2 -1,2 +1,2 @@@", "the unreadable header is named");
   check.has(result.stderr, "Nothing was reviewed", "it says nothing was reviewed");
   check.eq(sliceFilesOnDisk(prepped.runDir), null, "no slices were written");
   check.eq(existsSync(join(prepped.runDir, "manifest.json")), false, "no manifest was written");

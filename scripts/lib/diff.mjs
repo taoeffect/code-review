@@ -44,8 +44,11 @@ const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/;
  *    split into two paths, so every path here is a guess.
  *
  * Each hunk record is
- * `{ index, headerLine, text, heading, oldStart, oldLines, newStart, newLines,
- *    added, deleted, context, changed, countedOld, countedNew }`.
+ * `{ index, headerLine, headerUnreadable, text, heading, oldStart, oldLines,
+ *    newStart, newLines, added, deleted, context, changed, countedOld,
+ *    countedNew }`, where `headerUnreadable` says the `@@` line did not match
+ *    the unified-diff shape, so every count here is a guess and `checkParse`
+ *    reports it.
  */
 export function parseDiff(source) {
   const cursor = new Cursor(source);
@@ -116,9 +119,6 @@ function parseHunk(cursor, index, warnings) {
   const start = cursor.pos;
   const headerLine = cursor.take();
   const found = HUNK_HEADER.exec(headerLine);
-  if (!found) {
-    warnings.push(`unreadable hunk header: ${headerLine}`);
-  }
   const oldLines = found ? optionalCount(found[2]) : 0;
   const newLines = found ? optionalCount(found[4]) : 0;
 
@@ -166,6 +166,7 @@ function parseHunk(cursor, index, warnings) {
   return {
     index,
     headerLine,
+    headerUnreadable: found === null,
     text: cursor.source.slice(start, cursor.pos),
     heading: found ? found[5] : "",
     oldStart: found ? Number(found[1]) : 0,
@@ -540,7 +541,8 @@ function newLineRange(hunk) {
 
 /**
  * Check the parse itself. An empty list means the records hold every byte of the
- * input and every hunk header agrees with the lines below it.
+ * input, every `diff --git` and `@@` line could be read, and every hunk header
+ * agrees with the lines below it.
  *
  * The whole-diff check walks offsets with `startsWith`, so a diff of any size
  * never gets rebuilt as a second string in memory.
@@ -572,7 +574,13 @@ export function checkParse(parsed) {
     }
     let added = 0;
     let deleted = 0;
+    // An unreadable `@@` line gives no line counts, so the count check below
+    // compares 0 with 0 and passes while the hunk body sits outside every
+    // count. Fatal, or the manifest would claim the work is smaller than it is.
     for (const hunk of file.hunks) {
+      if (hunk.headerUnreadable) {
+        problems.push(`${file.path}: unreadable hunk header: ${hunk.headerLine}`);
+      }
       if (hunk.countedOld !== hunk.oldLines || hunk.countedNew !== hunk.newLines) {
         problems.push(
           `${file.path}: "${hunk.headerLine}" promises ${hunk.oldLines} old and ${hunk.newLines} new lines ` +
