@@ -771,6 +771,34 @@ function sliceFilesOnDisk(runDir) {
   return existsSync(dir) ? readdirSync(dir).sort() : null;
 }
 
+/**
+ * The manifest on disk against the manifest on stdout. `SKILL.md` says the
+ * printed JSON *is* `manifest.json`, and `split` builds one object and puts it
+ * through a single `JSON.stringify`, so a whole-object comparison is both
+ * correct and cheap. Comparing `sliceCount` alone passed a file whose every
+ * slice `path` was wrong and whose `batches` was empty, which is a manifest
+ * that sends an agent to slice files that do not exist.
+ *
+ * The file is read as `<runDir>/manifest.json` rather than through the printed
+ * `manifestFile`, so that pointer has to name the file that was written.
+ */
+function checkManifestFile(check, runDir, manifest, label) {
+  const at = join(runDir, "manifest.json");
+  check.eq(manifest.manifestFile, at, `${label}: manifestFile names the written manifest`);
+  let text = "";
+  try {
+    text = readFileSync(at, "utf8");
+  } catch (error) {
+    check.fail(`${label}: ${at} cannot be read: ${error.message}`);
+    return;
+  }
+  try {
+    check.deep(JSON.parse(text), manifest, `${label}: manifest.json matches stdout`);
+  } catch {
+    check.fail(`${label}: manifest.json is not one JSON object: ${clip(text)}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Fixture isolation
 // ---------------------------------------------------------------------------
@@ -1852,7 +1880,7 @@ test("split: a big file is cut at hunk boundaries and re-split cleanly", (check)
     manifest.slices.map((slice) => basename(slice.path)).sort(),
     "the slices folder holds exactly the planned files",
   );
-  check.eq(JSON.parse(readFileSync(manifest.manifestFile, "utf8")).sliceCount, manifest.sliceCount, "manifest.json matches stdout");
+  checkManifestFile(check, prepped.runDir, manifest, "split");
 
   const bigParts = manifest.slices.flatMap((slice) => slice.files.filter((file) => file.path === "src/big.txt"));
   check.ok(bigParts.length >= 3, `the big file was cut into ${bigParts.length} parts`);
@@ -1873,6 +1901,7 @@ test("split: a big file is cut at hunk boundaries and re-split cleanly", (check)
   const again = jsonOut(check, review(dir, ["split", "--run-dir", prepped.runDir, "--target", "5000"]), "re-split");
   check.eq(again?.sliceCount, 1, "one slice at target 5000");
   check.deep(sliceFilesOnDisk(prepped.runDir), ["slice-01.diff"], "the stale slice files are gone");
+  if (again) checkManifestFile(check, prepped.runDir, again, "re-split");
 });
 
 test("split: one hunk over the target is marked oversized", (check) => {
@@ -2004,7 +2033,7 @@ test("split: an empty diff writes no slices", (check) => {
   check.deep(manifest.batches, [], "batches");
   check.deep(sliceFilesOnDisk(prepped.runDir), [], "the slices folder is empty");
   check.has(result.stderr, "no file sections", "the warning");
-  check.eq(JSON.parse(readFileSync(manifest.manifestFile, "utf8")).sliceCount, 0, "manifest.json still parses");
+  checkManifestFile(check, prepped.runDir, manifest, "split");
 });
 
 test("split: refused run folders", (check) => {
