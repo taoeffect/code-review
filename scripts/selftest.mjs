@@ -33,7 +33,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
@@ -313,12 +313,29 @@ function snapshot(dir) {
     head: gitAt(dir, ["rev-parse", "HEAD"], { env, allowFail: true }).stdout.trim(),
     branch: gitAt(dir, ["symbolic-ref", "-q", "--short", "HEAD"], { env, allowFail: true }).stdout.trim(),
     status: gitAt(dir, ["status", "--porcelain", "--untracked-files=all"], { env, allowFail: true }).stdout,
-    index: hashFile(join(dir, ".git", "index")),
+    index: hashFile(indexPath(dir, env)),
     files: hashWorkingFiles(dir),
   };
 }
 
+/**
+ * Where this checkout's index really is. Only the main checkout keeps it at
+ * `.git/index`: a linked worktree has a `.git` *file* and its own index under
+ * `<common dir>/worktrees/<name>/`, so a hand-built path reads as missing on
+ * both sides of a run and the index half of the proof compares nothing. Git
+ * answers for both layouts, relative in the main checkout and absolute in a
+ * linked worktree, so the answer is resolved against the working directory.
+ */
+function indexPath(dir, env) {
+  const found = gitAt(dir, ["rev-parse", "--git-path", "index"], { env, allowFail: true });
+  if (found.code !== 0) return join(dir, ".git", "index");
+  return resolve(dir, found.stdout.trim());
+}
+
 function unchanged(check, before, after, label) {
+  // Two missing indexes compare equal and prove nothing, which is what a
+  // hand-built index path gives in a linked worktree.
+  check.ok(before.index !== "missing", `${label}: the index was not found, so that half of the proof is empty`);
   for (const key of ["head", "branch", "status", "index", "files"]) {
     check.eq(after[key], before[key], `${label}: ${key} changed`);
   }
@@ -2657,6 +2674,60 @@ test("end to end: prep, split, clean", (check) => {
   check.eq(existsSync(prepped.runDir), false, "the run folder is gone");
   unchanged(check, before, snapshot(dir), "the whole review");
   check.eq(gitOut(dir, ["status", "--porcelain"]), "", "the working directory is still clean");
+});
+
+test("end to end: a linked worktree shares the main checkout's run root", (check) => {
+  const main = newRepo("worktree-main");
+  put(main, "README.md", "# project\n");
+  put(main, "src/app.js", lines("base", 20));
+  commitAll(main, "base commit");
+  const linked = join(WORK, "worktree-linked");
+  gitAt(main, ["worktree", "add", "-q", "-b", "feature", linked]);
+  put(linked, "src/new.js", lines("new", 40));
+  commitAll(linked, "feature work");
+
+  // The layout this case exists for: no git folder of its own, an index of its
+  // own under the shared one, and the main checkout left on its own branch.
+  check.ok(lstatSync(join(linked, ".git")).isFile(), "the linked worktree's .git is a file");
+  const shared = join(realpathSync(main), RUN_ROOT);
+
+  const beforeMain = snapshot(main);
+  const beforeLinked = snapshot(linked);
+  check.eq(
+    beforeLinked.index,
+    hashFile(join(realpathSync(main), ".git", "worktrees", basename(linked), "index")),
+    "the snapshot hashes the linked worktree's own index",
+  );
+  check.ok(beforeLinked.index !== beforeMain.index, "the two checkouts do not share an index");
+
+  const prepped = jsonOut(check, review(linked, ["prep"]), "prep from the linked worktree");
+  if (!prepped) return;
+  check.eq(prepped.runDir, join(shared, basename(prepped.runDir)), "the run folder sits in the shared git folder");
+  check.eq(prepped.headBranch, "feature", "headBranch");
+  check.eq(prepped.totalChanged, 40, "totalChanged");
+  check.eq(gitOut(main, ["symbolic-ref", "--short", "HEAD"]), "master", "the main checkout is still on master");
+
+  // Run from the *main* checkout on purpose: `split` accepts a run folder only
+  // when it sits directly under the run root it computes for itself, so this
+  // fails unless both checkouts resolve the same shared folder.
+  const manifest = jsonOut(
+    check,
+    review(main, ["split", "--run-dir", prepped.runDir, "--target", "20"]),
+    "split from the main checkout",
+  );
+  if (!manifest) return;
+  check.eq(sliceTotal(manifest), 40, "slice totals add up");
+  checkRebuild(check, prepped.runDir, manifest, "split from the main checkout");
+  checkReverseApply(check, prepped.runDir, manifest, "split from the main checkout");
+
+  // `clean --all` has to find the same root from the worktree that `prep` used.
+  const cleaned = jsonOut(check, review(linked, ["clean", "--all"]), "clean from the linked worktree");
+  check.eq(cleaned?.runRoot, shared, "clean reports the shared run root");
+  check.deep(cleaned?.removed, [prepped.runDir], "removed");
+  check.eq(existsSync(prepped.runDir), false, "the run folder is gone");
+
+  unchanged(check, beforeLinked, snapshot(linked), "the whole review from the linked worktree");
+  unchanged(check, beforeMain, snapshot(main), "the main checkout");
 });
 
 function chunkIds(ids) {
