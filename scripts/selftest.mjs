@@ -332,16 +332,47 @@ function hashFile(path) {
   }
 }
 
-/** One hash over every working file, ignoring everything inside `.git`. */
+/**
+ * One hash over every working file, ignoring everything inside `.git`. Each
+ * entry contributes its kind, its permission bits, and what it holds, because
+ * content alone is not a write the proof can see: `readFileSync` follows a
+ * link, so a link pointed at another file of equal content reads the same, and
+ * a flipped executable bit changes no byte at all.
+ */
 function hashWorkingFiles(dir) {
   const digest = createHash("sha256");
   for (const path of walkFiles(dir)) {
     digest.update(path);
     digest.update("\0");
-    digest.update(hashFile(join(dir, path)));
+    digest.update(hashEntry(join(dir, path)));
     digest.update("\0");
   }
   return digest.digest("hex");
+}
+
+/**
+ * What one working entry is, as text: its kind, its permission bits, and
+ * either the text of the link or a hash of the bytes. The kind is in the text
+ * because a link and a regular file holding the link target's bytes read the
+ * same through `readFileSync` and must not hash alike.
+ */
+function hashEntry(path) {
+  let facts;
+  try {
+    facts = lstatSync(path);
+  } catch (error) {
+    return `missing ${error.code ?? "unknown"}`;
+  }
+  const mode = (facts.mode & 0o7777).toString(8).padStart(4, "0");
+  if (facts.isSymbolicLink()) {
+    try {
+      return `symlink ${mode} ${readlinkSync(path)}`;
+    } catch (error) {
+      return `symlink ${mode} unreadable ${error.code ?? "unknown"}`;
+    }
+  }
+  if (!facts.isFile()) return `other ${mode} ${facts.mode.toString(8)}`;
+  return `file ${mode} ${hashFile(path)}`;
 }
 
 function walkFiles(root, current = root, out = []) {
@@ -983,6 +1014,58 @@ test("harness: --only needs a value", (check) => {
   const filtered = runner(["--only", "diff: an empty diff plans zero slices"]);
   check.eq(filtered.code, 0, `a real filter still runs (stderr: ${clip(filtered.stderr)})`);
   check.has(filtered.stdout, "\n1 case(s), 0 failed", "a real filter chooses that one case");
+});
+
+// The read-only proof is only as good as its digest. The writes hardest to
+// notice are the ones that change no content at all: a chmod, or a link
+// pointed at another file that reads the same. `readFileSync` follows a link
+// and reports no mode, so a digest of path and content alone calls both of
+// those an untouched tree.
+test("harness: the working-file digest sees modes and symlink targets", (check) => {
+  const dir = newRepo("harness-digest");
+  put(dir, "one.txt", "same bytes\n");
+  put(dir, "two.txt", "same bytes\n");
+  const runPath = put(dir, "run.sh", "#!/bin/sh\necho hello\n");
+  symlinkSync("one.txt", join(dir, "link.txt"));
+  commitAll(dir, "base commit");
+
+  const base = hashWorkingFiles(dir);
+  check.eq(hashWorkingFiles(dir), base, "an untouched tree hashes the same twice");
+  check.eq(
+    hashFile(join(dir, "one.txt")),
+    hashFile(join(dir, "two.txt")),
+    "the two link targets hold equal bytes, so only the target text tells them apart",
+  );
+
+  const runMode = lstatSync(runPath).mode & 0o7777;
+  check.eq(runMode & 0o111, 0, "a fresh file starts with no executable bit");
+  chmodSync(runPath, runMode | 0o111);
+  check.ok(hashWorkingFiles(dir) !== base, "an executable bit reaches the digest");
+  chmodSync(runPath, runMode);
+  check.eq(hashWorkingFiles(dir), base, "putting the mode back puts the digest back");
+
+  del(dir, "link.txt");
+  symlinkSync("two.txt", join(dir, "link.txt"));
+  check.ok(hashWorkingFiles(dir) !== base, "a link retargeted at equal content reaches the digest");
+
+  del(dir, "link.txt");
+  put(dir, "link.txt", "same bytes\n");
+  check.ok(hashWorkingFiles(dir) !== base, "a regular file holding the target's bytes is not the link");
+
+  del(dir, "link.txt");
+  symlinkSync("one.txt", join(dir, "link.txt"));
+  check.eq(hashWorkingFiles(dir), base, "putting the link back puts the digest back");
+
+  // The digest matters only because `unchanged` reads it. An untracked file is
+  // where it stands alone: `git status` reports one by name, so its mode is
+  // invisible to every other key of a snapshot.
+  const scratch = put(dir, "scratch.sh", "#!/bin/sh\necho scratch\n");
+  const before = snapshot(dir);
+  chmodSync(scratch, (lstatSync(scratch).mode & 0o7777) | 0o111);
+  const probe = new Check("probe");
+  unchanged(probe, before, snapshot(dir), "an untracked file made executable");
+  check.eq(probe.problems.length, 1, `exactly one key reports it: ${clip(probe.problems.join(" | "))}`);
+  check.has(probe.problems[0] ?? "", "files changed", "the files key is the one that reports it");
 });
 
 // ---------------------------------------------------------------------------
