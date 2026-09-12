@@ -433,10 +433,18 @@ function createRun(runRoot) {
   const runDir = join(runRoot, runId);
   // Not recursive, so a name already in use is an error rather than a takeover.
   mkdirSync(runDir);
-  writeFileSync(
-    join(runDir, MARKER_NAME),
-    `${JSON.stringify({ tool: "code-review", runId, createdAt, pid: process.pid }, null, 2)}\n`,
-  );
+  try {
+    writeFileSync(
+      join(runDir, MARKER_NAME),
+      `${JSON.stringify({ tool: "code-review", runId, createdAt, pid: process.pid }, null, 2)}\n`,
+    );
+  } catch (error) {
+    // An unmarked folder is one this tool refuses to delete for the rest of
+    // time: `sweepRuns` skips it and `resolveManagedRun` rejects it. Undo the
+    // folder here, while we still know it is ours.
+    rmSync(runDir, { recursive: true, force: true });
+    throw error;
+  }
   return runDir;
 }
 

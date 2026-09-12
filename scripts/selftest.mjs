@@ -34,7 +34,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   MAX_BATCH,
@@ -206,9 +206,14 @@ const gitOut = (cwd, args) => gitAt(cwd, args).stdout.trim();
  */
 const protectedDiff = (cwd, args, opts) => gitAt(cwd, [...DIFF_CONFIG, "diff", ...DIFF_FLAGS, ...args], opts).stdout;
 
-/** Run the real CLI as a child process, exactly as the skill does. */
-function review(cwd, args, env = {}) {
-  const result = spawnSync(process.execPath, [CLI, ...args], {
+/**
+ * Run the real CLI as a child process, exactly as the skill does. `script` is
+ * for the one case that needs a process-wide setting the CLI cannot be given
+ * through the environment: it names a wrapper that sets it and then imports
+ * the real CLI, which still sees the same `process.argv`.
+ */
+function review(cwd, args, env = {}, script = CLI) {
+  const result = spawnSync(process.execPath, [script, ...args], {
     cwd,
     encoding: "utf8",
     maxBuffer: 256 * 1024 * 1024,
@@ -1897,6 +1902,44 @@ test("prep: a failure after the run folder exists removes it", (check) => {
   const runRoot = join(dir, RUN_ROOT);
   const left = existsSync(runRoot) ? readdirSync(runRoot) : [];
   check.deep(left, [], "the partial run folder was removed");
+});
+
+test("prep: a run folder whose marker cannot be written is undone", (check) => {
+  const dir = simpleRepo("prep-marker");
+  // A umask of 222 makes every folder the CLI creates read-only, so `mkdir`
+  // still works and the marker write inside the new folder gets EACCES. That
+  // is the one failure the run folder cannot survive: without the marker,
+  // `sweepRuns` skips the folder and `clean --run-dir` refuses it, so nothing
+  // this tool offers can ever remove it again.
+  const wrapper = join(WORK, "umask-prep.mjs");
+  writeFileSync(wrapper, `process.umask(0o222);\nawait import(${JSON.stringify(pathToFileURL(CLI).href)});\n`);
+
+  const probe = join(WORK, "prep-marker-probe");
+  mkdirSync(probe, { mode: 0o555 });
+  let refused = false;
+  try {
+    writeFileSync(join(probe, "x"), "x");
+  } catch {
+    refused = true;
+  }
+  if (!check.ok(refused, "this case needs a user a read-only folder can refuse: do not run the suite as root")) return;
+
+  // The run root has to exist already, or the hostile umask makes that folder
+  // read-only instead and the run folder is never created at all.
+  const first = jsonOut(check, review(dir, ["prep"]), "first prep");
+  if (!first) return;
+
+  const before = snapshot(dir);
+  const result = review(dir, ["prep"], {}, wrapper);
+  unchanged(check, before, snapshot(dir), "prep under a hostile umask");
+  check.eq(result.code, 1, `exit code (stderr: ${clip(result.stderr)})`);
+  check.eq(result.stdout, "", "stdout must stay empty");
+  check.has(result.stderr, MARKER, "the failure names the marker file it could not write");
+  const runRoot = join(dir, RUN_ROOT);
+  check.deep(readdirSync(runRoot), [], "no unmarked folder is left behind");
+
+  const cleaned = jsonOut(check, review(dir, ["clean", "--all"]), "clean --all");
+  check.deep(cleaned?.removed, [], "clean --all has nothing left to remove");
 });
 
 test("prep: usage faults", (check) => {
