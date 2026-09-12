@@ -485,34 +485,27 @@ export function diffToFile({ from, to, outPath, excludes = DEFAULT_EXCLUDES, con
  * Per-file change counts, straight from git. Binary files report zero changed
  * lines and carry `binary: true`.
  *
+ * `--raw` and `--numstat` are asked for in the one call, because the counts on
+ * their own do not say whether a file was added, deleted, or renamed. Rename
+ * detection is the expensive half of a large diff, and a second call over the
+ * same trees would pay for it twice and could answer differently.
+ *
  * Returns `[{ path, oldPath, status, added, deleted, changed, binary }]`.
  */
 export function numstat({ from, to, excludes = DEFAULT_EXCLUDES }, opts = {}) {
-  const diffArgs = (extra) => [
+  const args = [
     ...DIFF_CONFIG,
     "diff",
     ...DIFF_FLAGS,
-    ...extra,
+    "--raw",
+    "--numstat",
     "-z",
     from,
     to,
     "--",
     ...pathspecs(excludes),
   ];
-  const counts = parseNumstatZ(gitOrThrow(diffArgs(["--numstat"]), opts).stdout);
-  const statuses = parseNameStatusZ(gitOrThrow(diffArgs(["--name-status"]), opts).stdout);
-  return counts.map((entry) => {
-    const named = statuses.get(entry.path);
-    return {
-      path: entry.path,
-      oldPath: entry.oldPath ?? named?.oldPath ?? null,
-      status: named?.status ?? "M",
-      added: entry.added,
-      deleted: entry.deleted,
-      changed: entry.added + entry.deleted,
-      binary: entry.binary,
-    };
-  });
+  return parseRawNumstatZ(gitOrThrow(args, opts).stdout);
 }
 
 /** Total changed lines across the records `numstat` returned. */
@@ -544,20 +537,38 @@ function splitLines(text) {
   return text.split("\n").filter((line) => line.length > 0);
 }
 
-// `--numstat -z` writes "added TAB deleted TAB path NUL". A rename or copy
-// leaves the path field empty and follows it with old NUL new NUL.
+// `--raw --numstat -z` writes both sections into one NUL-separated stream:
+// every status record first, then every count record. Git emits them from one
+// diff queue under one filter, so the two sections describe the same files in
+// the same order, and `pairRecords` refuses a stream where they do not.
 //
-// `-z` hands the path over raw, with no quoting, so only the first two tabs are
-// field separators and a name holding a tab keeps its own. Splitting on every
-// tab cut such a path short, and the cut key then missed in the status map, so
-// the record also lost its status.
-function parseNumstatZ(text) {
+// A status head is ":<old mode> <new mode> <old sha> <new sha> <status>" and a
+// count head is "<added> TAB <deleted> TAB <path>", so a leading colon is what
+// tells the two kinds apart: a count head starts with a digit or a "-".
+//
+// `-z` hands a path over raw, with no quoting, so only the first two tabs of a
+// count head are field separators and a name holding a tab keeps its own.
+// Splitting on every tab cut such a path short.
+function parseRawNumstatZ(text) {
   const fields = text.split("\0");
-  const records = [];
+  const statuses = [];
+  const counts = [];
   let i = 0;
   while (i < fields.length) {
     const head = fields[i++];
     if (head === "") continue;
+    if (head.startsWith(":")) {
+      // A rename or a copy names both of its sides. Reading one as a plain
+      // record would take the source path for the record's own and then read
+      // the target path as the next head, desyncing the rest of the stream.
+      // Our own flags never ask for copy detection (see `DIFF_FLAGS`), so the
+      // `C` half of this is defensive.
+      const status = rawStatus(head);
+      const oldPath = status === "R" || status === "C" ? (fields[i++] ?? "") : null;
+      const path = fields[i++] ?? "";
+      statuses.push({ status, oldPath, path });
+      continue;
+    }
     const firstTab = head.indexOf("\t");
     const secondTab = firstTab === -1 ? -1 : head.indexOf("\t", firstTab + 1);
     if (secondTab === -1) {
@@ -575,7 +586,7 @@ function parseNumstatZ(text) {
       path = fields[i++] ?? "";
     }
     const binary = addedText === "-" || deletedText === "-";
-    records.push({
+    counts.push({
       path,
       oldPath,
       added: binary ? 0 : Number(addedText),
@@ -583,30 +594,48 @@ function parseNumstatZ(text) {
       binary,
     });
   }
-  return records;
+  return pairRecords(statuses, counts);
 }
 
-// `--name-status -z` writes "status NUL path NUL", and for a rename or copy
-// "R100 NUL old NUL new NUL". The `C` half of that pair is defensive: our own
-// flags never ask for copy detection (see `DIFF_FLAGS`), but a `C` record read
-// as a plain one would take the source path for the record's own and then read
-// the target path as the next status, desyncing the whole stream.
-function parseNameStatusZ(text) {
-  const fields = text.split("\0");
-  const byPath = new Map();
-  let i = 0;
-  while (i < fields.length) {
-    const token = fields[i++];
-    if (token === "") continue;
-    const status = token[0];
-    if (status === "R" || status === "C") {
-      const oldPath = fields[i++] ?? "";
-      const path = fields[i++] ?? "";
-      byPath.set(path, { status, oldPath });
-    } else {
-      const path = fields[i++] ?? "";
-      byPath.set(path, { status, oldPath: null });
-    }
+// The status is the last space-separated field of a raw head, and it carries a
+// similarity number on a rename or a copy, as in "R100".
+function rawStatus(head) {
+  const at = head.lastIndexOf(" ");
+  const token = at === -1 ? "" : head.slice(at + 1);
+  if (token === "") {
+    throw new GitError(`could not read the raw record: ${head}`, "RAW_UNREADABLE");
   }
-  return byPath;
+  return token[0];
 }
+
+// One record per file, out of the two sections that describe it. A file the
+// two sections name differently is a fault worth stopping for: the alternative
+// is publishing a file under a status git never gave it.
+function pairRecords(statuses, counts) {
+  if (statuses.length !== counts.length) {
+    throw new GitError(
+      `git described ${statuses.length} files by status and ${counts.length} by count`,
+      "DIFF_RECORDS_DISAGREE",
+    );
+  }
+  return counts.map((entry, at) => {
+    const named = statuses[at];
+    if (named.path !== entry.path || named.oldPath !== entry.oldPath) {
+      throw new GitError(
+        `git described ${describeChange(named)} by status and ${describeChange(entry)} by count`,
+        "DIFF_RECORDS_DISAGREE",
+      );
+    }
+    return {
+      path: entry.path,
+      oldPath: entry.oldPath,
+      status: named.status,
+      added: entry.added,
+      deleted: entry.deleted,
+      changed: entry.added + entry.deleted,
+      binary: entry.binary,
+    };
+  });
+}
+
+const describeChange = (record) => (record.oldPath === null ? record.path : `${record.oldPath} -> ${record.path}`);
