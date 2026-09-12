@@ -282,8 +282,14 @@ function split(args) {
   let source;
   try {
     source = readFileSync(diffFile, "latin1");
-  } catch {
-    throw new ReviewError(`${diffFile} is missing, so this run folder is not a finished prep.`);
+  } catch (error) {
+    // Only a missing file says "no finished prep". A permission fault, an
+    // EISDIR, or an ERR_STRING_TOO_LONG from a diff past V8's largest string
+    // would otherwise send the operator to re-run prep, which cannot help.
+    if (error.code === "ENOENT") {
+      throw new ReviewError(`${diffFile} is missing, so this run folder is not a finished prep.`);
+    }
+    throw new ReviewError(`${diffFile} could not be read: ${error.message}`);
   }
 
   const parsed = parseDiff(source);

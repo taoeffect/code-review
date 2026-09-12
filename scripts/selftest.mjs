@@ -2308,7 +2308,7 @@ test("split: a diff with no sliceable content stops the run", (check) => {
   unchanged(check, before, snapshot(dir), "a failed self-check");
 });
 
-test("split: usage faults and a run folder with no full.diff", (check) => {
+test("split: usage faults, a full.diff that cannot be read, and a missing one", (check) => {
   const dir = simpleRepo("split-usage");
   const prepped = jsonOut(check, review(dir, ["prep"]), "prep");
   if (!prepped) return;
@@ -2331,7 +2331,17 @@ test("split: usage faults and a run folder with no full.diff", (check) => {
   }
   check.eq(sliceFilesOnDisk(prepped.runDir), null, "a usage fault writes no slices");
 
-  rmSync(join(prepped.runDir, "full.diff"));
+  // A `full.diff` that is there but unreadable is not a half-finished prep, and
+  // re-running prep cannot help, so the message has to name the real cause.
+  const diffFile = join(prepped.runDir, "full.diff");
+  rmSync(diffFile);
+  mkdirSync(diffFile);
+  const unreadable = review(dir, ["split", "--run-dir", prepped.runDir]);
+  failedRun(check, unreadable, 1, "split on a full.diff it cannot read");
+  check.has(unreadable.stderr, "could not be read: EISDIR", "the real cause is named");
+  check.hasNot(unreadable.stderr, "not a finished prep", "an unreadable file is not a missing one");
+
+  rmSync(diffFile, { recursive: true });
   const result = review(dir, ["split", "--run-dir", prepped.runDir]);
   failedRun(check, result, 1, "split on a run folder with no full.diff");
   check.has(result.stderr, "not a finished prep", "message");
