@@ -178,9 +178,18 @@ export function requireMergeTree(opts = {}) {
 /**
  * Staged or unstaged changes to tracked files. Untracked files are fine, so
  * they are left out of the check.
+ *
+ * `--ignore-submodules=dirty` is pinned for two reasons. A review compares
+ * committed trees, and a submodule's content is never part of the parent's
+ * tree, so edits inside one cannot reach the diff and must not stop the run.
+ * And the flag overrides `submodule.<name>.ignore` and `diff.ignoreSubmodules`,
+ * which would otherwise let repository config hide a changed submodule commit.
+ * A submodule commit that differs from the one the parent records is a change
+ * to the parent, so it is still reported, staged or not.
  */
 export function isDirty(opts = {}) {
-  const lines = splitLines(gitOrThrow(["status", "--porcelain", "--untracked-files=no"], opts).stdout);
+  const args = ["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=dirty"];
+  const lines = splitLines(gitOrThrow(args, opts).stdout);
   return { dirty: lines.length > 0, lines };
 }
 

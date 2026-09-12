@@ -29,8 +29,11 @@ writes to HEAD, the real index, or working files. Inspect source under
 Exit codes: 0 ready; 1 other failure; 2 staged or unstaged tracked changes; 3
 merge conflict; 4 missing or invalid base; 5 Git older than 2.38; 6 failed split
 self-check. On nonzero, report the stated problem and stop. For code 2, ask the
-user to commit, stash, or discard the changes. A base-behind warning concerns the
-existing local tracking ref only.
+user to commit, stash, or discard the changes. Edits inside a submodule are the
+one exception: they never reach this review, so they do not give code 2. A
+submodule commit that differs from the one the parent records still does, because
+that is a change to the parent. A base-behind warning concerns the existing local
+tracking ref only.
 
 If `files` is empty, write a no-changes note, clean as in Section 5, and stop.
 Zero `totalChanged` with a nonempty `files` is still work: a rename, a mode

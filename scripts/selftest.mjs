@@ -355,6 +355,32 @@ function simpleRepo(name, { added = 40 } = {}) {
 }
 
 /**
+ * A base branch and a feature branch, plus a submodule checked out at `sub`.
+ *
+ * The submodule repository has two commits, so a case can move its HEAD back
+ * one and give the parent a gitlink change. `protocol.file.allow` has to be
+ * turned on for this one command, because git refuses to clone a submodule over
+ * a plain path by default.
+ */
+function submoduleRepo(name) {
+  const inner = newRepo(`${name}-inner`);
+  put(inner, "lib.txt", lines("inner", 5));
+  commitAll(inner, "inner one");
+  put(inner, "lib.txt", lines("inner", 6));
+  commitAll(inner, "inner two");
+
+  const dir = newRepo(name);
+  put(dir, "src/app.js", lines("base", 20));
+  commitAll(dir, "base commit");
+  gitAt(dir, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", inner, "sub"]);
+  commitAll(dir, "add the submodule");
+  gitAt(dir, ["checkout", "-q", "-b", "feature"]);
+  put(dir, "src/new.js", lines("new", 40));
+  commitAll(dir, "feature work");
+  return dir;
+}
+
+/**
  * One repository holding every diff record type worth worrying about: a
  * deletion, an addition, a binary change, a binary addition, a binary deletion,
  * a pure rename, a mode-only change, a quoted non-ASCII path, a path with a
@@ -1292,6 +1318,49 @@ test("prep: a dirty working directory stops the run", (check) => {
   failedRun(check, result, 2, "prep with a staged change");
   check.has(result.stderr, "src/app.js", "the staged file is named");
   check.eq(existsSync(join(dir, RUN_ROOT)), false, "still no run root");
+});
+
+test("prep: only the parent's own uncommitted work stops the run", (check) => {
+  const dir = submoduleRepo("prep-submodule");
+  const sub = join(dir, "sub");
+
+  put(dir, "sub/lib.txt", lines("edited", 6));
+  let before = snapshot(dir);
+  let out = jsonOut(check, review(dir, ["prep"]), "prep with an edited submodule file");
+  unchanged(check, before, snapshot(dir), "prep with an edited submodule file");
+  check.eq(out?.totalChanged, 40, "the parent's own work is what gets reviewed");
+
+  gitAt(sub, ["add", "lib.txt"]);
+  before = snapshot(dir);
+  jsonOut(check, review(dir, ["prep"]), "prep with a staged submodule file");
+  unchanged(check, before, snapshot(dir), "prep with a staged submodule file");
+  gitAt(sub, ["reset", "-q", "--hard", "HEAD"]);
+
+  put(dir, "src/app.js", lines("touched", 20));
+  before = snapshot(dir);
+  let result = review(dir, ["prep"]);
+  unchanged(check, before, snapshot(dir), "prep with a parent edit");
+  failedRun(check, result, 2, "prep with a parent edit");
+  check.has(result.stderr, "src/app.js", "the parent file is named");
+  gitAt(dir, ["checkout", "-q", "--", "src/app.js"]);
+
+  // A submodule commit the parent does not record is a parent change, and the
+  // config that would hide it must not win over the pinned flag.
+  gitAt(sub, ["checkout", "-q", "HEAD~1"]);
+  gitAt(dir, ["config", "submodule.sub.ignore", "all"]);
+  gitAt(dir, ["config", "diff.ignoreSubmodules", "all"]);
+  before = snapshot(dir);
+  result = review(dir, ["prep"]);
+  unchanged(check, before, snapshot(dir), "prep with a moved submodule commit");
+  failedRun(check, result, 2, "prep with a moved submodule commit");
+  check.has(result.stderr, " M sub", "the submodule is named");
+
+  gitAt(dir, ["add", "sub"]);
+  before = snapshot(dir);
+  result = review(dir, ["prep"]);
+  unchanged(check, before, snapshot(dir), "prep with a staged submodule commit");
+  failedRun(check, result, 2, "prep with a staged submodule commit");
+  check.has(result.stderr, "M  sub", "the staged submodule is named");
 });
 
 test("prep: a detached HEAD reports no branch", (check) => {
