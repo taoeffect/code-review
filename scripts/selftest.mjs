@@ -356,9 +356,13 @@ function simpleRepo(name, { added = 40 } = {}) {
 
 /**
  * One repository holding every diff record type worth worrying about: a
- * deletion, an addition, a binary change, a pure rename, a mode-only change, a
- * quoted non-ASCII path, a path with a space, CRLF content, and a file with no
- * final newline on either side.
+ * deletion, an addition, a binary change, a binary addition, a binary deletion,
+ * a pure rename, a mode-only change, a quoted non-ASCII path, a path with a
+ * space, CRLF content, and a file with no final newline on either side.
+ *
+ * The added and the deleted binary are the two sections git writes with no
+ * `---` and `+++` pair, so the side that does not exist can only be read back
+ * out of the `diff --git` line.
  */
 function zooRepo(name) {
   const dir = newRepo(name);
@@ -366,6 +370,7 @@ function zooRepo(name) {
   put(dir, "src/mode.sh", "#!/bin/sh\necho hello\n");
   put(dir, "src/rename me.txt", lines("moved", 5));
   put(dir, "src/data.bin", Buffer.from([0, 1, 2, 3, 0, 255, 7]));
+  put(dir, "src/removed.bin", Buffer.from([0, 4, 4, 4, 0, 254, 8]));
   put(dir, "src/no-newline.txt", "alpha\nomega-old");
   put(dir, "src/café.txt", "coffee\n");
   put(dir, "src/with space.txt", "spaced\n");
@@ -384,6 +389,8 @@ function zooRepo(name) {
   del(dir, "src/deleted.txt");
   put(dir, "src/crlf.txt", "one\r\nTWO\r\nthree\r\n");
   put(dir, "src/added.txt", lines("fresh feature line", 6));
+  put(dir, "src/added.bin", Buffer.from([0, 7, 7, 7, 0, 253, 9]));
+  del(dir, "src/removed.bin");
   commitAll(dir, "every record type");
   return dir;
 }
@@ -851,7 +858,7 @@ test("diff: every record type of a real git diff", (check) => {
 
   check.deep(parsed.warnings, [], "warnings");
   check.none(checkParse(parsed), "checkParse");
-  check.eq(parsed.files.length, 10, "file sections");
+  check.eq(parsed.files.length, 12, "file sections");
   check.eq(parsed.preamble, "", "preamble");
   check.eq(parsed.preamble + parsed.files.map((file) => file.text).join(""), text, "records rebuild the diff");
 
@@ -868,6 +875,14 @@ test("diff: every record type of a real git diff", (check) => {
   check.eq(byPath.get("src/mode.sh")?.modeOnly, true, "mode-only flag");
   check.eq(byPath.get("src/deleted.txt")?.newPath, null, "deleted new path");
   check.eq(byPath.get("src/added.txt")?.oldPath, null, "added old path");
+  // A section with no `---` and `+++` pair takes both paths from one line that
+  // names both sides, so this is where a fresh file used to claim an old path.
+  check.eq(status("src/added.bin"), "A", "added binary status");
+  check.eq(status("src/removed.bin"), "D", "deleted binary status");
+  check.eq(byPath.get("src/added.bin")?.oldPath, null, "an added binary has no old side");
+  check.eq(byPath.get("src/added.bin")?.newPath, "src/added.bin", "the added binary keeps its new side");
+  check.eq(byPath.get("src/removed.bin")?.newPath, null, "a deleted binary has no new side");
+  check.eq(byPath.get("src/removed.bin")?.oldPath, "src/removed.bin", "the deleted binary keeps its old side");
   check.ok(byPath.has("src/with space.txt"), `path with a space: ${clip([...byPath.keys()].join(", "))}`);
   check.ok(byPath.has("src/café.txt"), `quoted non-ASCII path: ${clip([...byPath.keys()].join(", "))}`);
 
@@ -1766,6 +1781,23 @@ test("split: every record type appears in exactly one slice", (check) => {
   const zeroChanged = diff.files.filter((file) => file.changed === 0).map((file) => file.path);
   check.ok(zeroChanged.length >= 3, `records with no hunks: ${clip(zeroChanged.join(", "))}`);
   for (const path of zeroChanged) check.eq(counts.get(path), 1, `${path}: a record with no hunks still gets a slice`);
+
+  // `prep` prints a `files` array and `split` prints one inside every slice. A
+  // reviewer reads the two side by side, so a field they share must mean one
+  // thing: `oldPath` is the rename or copy source, never the file's own path.
+  const preppedOld = new Map(prepped.files.map((file) => [file.path, file.oldPath]));
+  for (const slice of manifest.slices) {
+    for (const file of slice.files) {
+      if (!check.ok(preppedOld.has(file.path), `${file.path}: prep must hold the same record`)) continue;
+      check.eq(file.oldPath, preppedOld.get(file.path), `${file.path}: oldPath in the manifest against prep`);
+    }
+  }
+  check.eq(preppedOld.get("src/renamed.txt"), "src/rename me.txt", "prep names the rename source");
+  check.deep(
+    manifest.slices.flatMap((slice) => slice.files.filter((file) => file.oldPath !== null).map((file) => file.path)),
+    ["src/renamed.txt"],
+    "only a rename or a copy carries an oldPath",
+  );
 
   const written = manifest.slices.map((slice) => readDiff(join(prepped.runDir, slice.path))).join("");
   check.has(written, "+TWO\r\n", "the written slices keep carriage returns");

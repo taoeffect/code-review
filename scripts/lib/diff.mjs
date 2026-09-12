@@ -41,7 +41,10 @@ const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/;
  *    pathsUnreadable, header, text, hunks, added, deleted, changed }`, where
  *    `path`, `oldPath`, and `newPath` are decoded text, `header` and `text` are
  *    raw bytes, and `pathsUnreadable` says the `diff --git` line could not be
- *    split into two paths, so every path here is a guess.
+ *    split into two paths, so every path here is a guess. `oldPath` and
+ *    `newPath` are the two sides of the section, so both name the same path for
+ *    a plain modification, and the side an added or a deleted file does not have
+ *    is `null`.
  *
  * Each hunk record is
  * `{ index, headerLine, headerUnreadable, text, heading, oldStart, oldLines,
@@ -184,7 +187,10 @@ function parseHunk(cursor, index, warnings) {
 
 // Paths come from the `---` and `+++` lines when they exist, because those are
 // unambiguous. A binary, mode-only, or pure rename section has no such lines, so
-// the rename lines or the `diff --git` line answer instead.
+// the rename lines or the `diff --git` line answer instead. Those two sources
+// name both sides even when one side does not exist, so an added or a deleted
+// section has its missing side taken back out: `/dev/null` is what the `---` and
+// `+++` lines would have said.
 function readHeaderFacts(headerLines) {
   let status = "M";
   let binary = false;
@@ -222,6 +228,8 @@ function readHeaderFacts(headerLines) {
   if (newSide !== null) newPath = sidePath(newSide);
   if (renameFrom !== null) oldPath = stripSidePrefix(renameFrom);
   if (renameTo !== null) newPath = stripSidePrefix(renameTo);
+  if (status === "A" && oldSide === null) oldPath = null;
+  if (status === "D" && newSide === null) newPath = null;
   return { status, binary, modeChanged, oldPath, newPath, pathsUnreadable: fromLine.unreadable };
 }
 
@@ -506,7 +514,16 @@ function batchesOf(slices, size) {
   return batches;
 }
 
-/** The plan as plain data, ready for `manifest.json`. */
+/**
+ * The plan as plain data, ready for `manifest.json`.
+ *
+ * A file entry's `oldPath` names the rename or copy source and is `null` for
+ * anything else, which is the rule `numstat` in `scripts/lib/git.mjs` uses for
+ * the `files` array `prep` prints. The two objects are read side by side, so the
+ * field has to mean one thing: it is how a reviewer tells a fresh file from a
+ * moved one. A parsed file record instead carries both sides of the section, so
+ * it cannot be copied through.
+ */
 export function describePlan(plan) {
   return {
     target: plan.target,
@@ -522,7 +539,7 @@ export function describePlan(plan) {
       oversized: slice.oversized,
       files: slice.parts.map((part) => ({
         path: part.file.path,
-        oldPath: part.file.oldPath,
+        oldPath: part.file.status === "R" || part.file.status === "C" ? part.file.oldPath : null,
         status: part.file.status,
         binary: part.file.binary,
         changed: part.changed,
