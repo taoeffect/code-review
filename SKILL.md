@@ -32,9 +32,15 @@ self-check. On nonzero, report the stated problem and stop. For code 2, ask the
 user to commit, stash, or discard the changes. A base-behind warning concerns the
 existing local tracking ref only.
 
-If `totalChanged` is zero, write a no-changes note, clean as in Section 5, and
-stop. If `massive` is false, review the complete `diffFile` using Sections 3 and
-4. Otherwise, continue below.
+If `files` is empty, write a no-changes note, clean as in Section 5, and stop.
+Zero `totalChanged` with a nonempty `files` is still work: a rename, a mode
+change, or a replaced binary changes behaviour without changing a line. Review
+those records for their effects — for a rename, references to the old path,
+relative paths inside the moved file, and anything keyed to a filename or
+location — rather than re-reviewing unchanged code.
+
+If `massive` is false, review the complete `diffFile` using Sections 3 and 4.
+Otherwise, continue below.
 
 ## 2. Split and delegate a massive review
 

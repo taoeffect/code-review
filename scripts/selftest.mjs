@@ -1017,9 +1017,44 @@ test("prep: an empty diff is not a crash", (check) => {
   check.eq(out.totalChanged, 0, "totalChanged");
   check.deep(out.files, [], "files");
   check.eq(out.massive, false, "massive");
-  check.has(result.stderr, "no changed lines", "the warning");
+  check.has(result.stderr, "nothing to review", "the warning");
   check.eq(statSync(out.diffFile).size, 0, "full.diff is empty");
   check.ok(existsSync(join(out.sourceDir, "src/app.js")), "the snapshot is still written");
+});
+
+test("prep: zero changed lines with files is still work to review", (check) => {
+  const dir = newRepo("prep-zero-lines");
+  put(dir, "src/move me.txt", lines("moved", 5));
+  put(dir, "src/mode.sh", "#!/bin/sh\necho hello\n");
+  put(dir, "src/data.bin", Buffer.from([0, 1, 2, 3, 0, 255, 7]));
+  commitAll(dir, "base commit");
+
+  gitAt(dir, ["checkout", "-q", "-b", "feature"]);
+  gitAt(dir, ["mv", "src/move me.txt", "src/moved.txt"]);
+  chmodSync(join(dir, "src/mode.sh"), 0o755);
+  put(dir, "src/data.bin", Buffer.from([0, 9, 9, 9, 0, 1, 2, 3]));
+  commitAll(dir, "a rename, a mode change, and a binary change");
+
+  const before = snapshot(dir);
+  const result = review(dir, ["prep"]);
+  unchanged(check, before, snapshot(dir), "prep");
+  const out = jsonOut(check, result, "prep");
+  if (!out) return;
+  check.eq(out.totalChanged, 0, "totalChanged");
+  check.eq(out.massive, false, "massive");
+  check.deep(
+    out.files.map((file) => `${file.status} ${file.path}`).sort(),
+    ["M src/data.bin", "M src/mode.sh", "R src/moved.txt"],
+    "files",
+  );
+  // The whole point of the case: no changed lines must not be reported as an
+  // empty branch, because full.diff holds three records.
+  check.ok(!result.stderr.includes("nothing to review"), `stderr must not dismiss the run: ${clip(result.stderr)}`);
+  check.has(result.stderr, "still work to review", "the warning");
+  const parsed = parseDiff(readDiff(out.diffFile));
+  check.none(checkParse(parsed), "full.diff checkParse");
+  check.eq(parsed.totals.changed, 0, "full.diff changed lines");
+  check.eq(parsed.files.length, 3, "full.diff record count");
 });
 
 test("prep: the exclusion list and --exclude", (check) => {

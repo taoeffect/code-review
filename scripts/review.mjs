@@ -221,7 +221,15 @@ function prep(args) {
       opts,
     );
     const sourceDir = materializeTree({ tree: to, outDir: join(runDir, "source") }, opts);
-    if (changed === 0) warn("The merged diff holds no changed lines. There is nothing to review.");
+    // `numstat` counts 0 for a pure rename and a mode-only change, and reports
+    // `- -` for a binary file, so zero changed lines is not an empty branch.
+    // Only an empty `files` array means there is nothing in the diff at all.
+    if (files.length === 0) {
+      warn("The merged diff holds no files. There is nothing to review.");
+    } else if (changed === 0) {
+      warn("The merged diff holds no changed lines, only renames, mode changes, or binary changes.");
+      warn("That is still work to review.");
+    }
 
     print({
       baseRef: base.shortName,
