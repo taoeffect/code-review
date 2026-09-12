@@ -2654,8 +2654,18 @@ test("clean: --all removes only marked runs", (check) => {
   const twice = jsonOut(check, review(dir, ["clean", "--all"]), "second clean --all");
   check.deep(twice?.removed, [], "a second sweep removes nothing");
 
+  // Inside the git folder there is no work tree to discover, so this call is
+  // the only proof that the sweep finds the run root from `--git-common-dir`
+  // alone. A marked run planted first is what makes a wrong root visible: a
+  // root that does not exist sweeps nothing and answers the same empty list a
+  // right one would.
+  const third = join(runRoot, "run-from-git-dir");
+  mkdirSync(third, { recursive: true });
+  writeFileSync(join(third, MARKER), "{}\n");
   const fromGitDir = jsonOut(check, review(runRoot, ["clean", "--all"]), "clean --all from inside the git folder");
-  check.deep(fromGitDir?.removed, [], "the sweep works from inside the git folder");
+  check.eq(fromGitDir?.runRoot, runRoot, "the run root found from inside the git folder");
+  check.deep(fromGitDir?.removed, [third], "the sweep works from inside the git folder");
+  check.eq(existsSync(third), false, "the marked run is gone");
 });
 
 test("clean: no run root at all", (check) => {
