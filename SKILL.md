@@ -70,13 +70,22 @@ related slices if useful, with at most three agents per batch and full coverage.
 
 Each packet identifies `sourceDir`, its slice diff, and the exact manifest file
 parts and ranges. Include Sections 3 and 4 plus all user context. Require
-read-only inspection, full assigned coverage, and findings returned to the
-parent in the Section 4 format. Permit wider source inspection only for context.
-Do not let workers launch subagents or write the final review.
+read-only inspection and full assigned coverage. Permit wider source inspection
+only for context. Do not let workers launch subagents or write the final review.
+Name the worker's output channel in every packet, with this wording:
 
-The parent verifies findings against `sourceDir` and the complete `diffFile`,
-removes duplicates, resolves cross-slice findings, confirms every assignment was
-covered, and writes the final review.
+> Write your complete review to STDOUT in your final response, using Section 4's
+> Markdown review format. Do not write your review to any file. The file-writing
+> instructions in Sections 3 and 4 apply only to the parent (which you are not).
+
+A worker that fails, or returns no usable review, is not retried; an explicit
+no-issues review is a usable result. The parent verifies the findings it does
+have against `sourceDir` and the complete `diffFile`, removes duplicates,
+resolves cross-slice findings, and writes the final review. Account for every
+manifest assignment as reviewed or unreviewed. If any is unreviewed, say so
+plainly in an **Unreviewed files** section placed immediately after the review
+header and before the first issue, listing each lost worker's assigned paths
+from the manifest, and the slice or ranges for a partial-file assignment.
 
 ## 3. Gather context and review
 
@@ -93,11 +102,11 @@ Use read-only tool calls to explore the codebase for additional context as neede
 - **Trace data flow**: Follow data through the changed code paths to verify correctness.
 - **Verify error handling**: Ensure new code paths handle errors appropriately.
 
-**DO NOT modify any source files during the review.** Apart from the temporary diff, the only file you write is the review output file.
+**DO NOT modify any source files during the review.** Apart from the temporary diff, the only file you write is the review output file. That file is the parent's: a worker writes no file at all (Section 2).
 
 ## 4. Format and write the review
 
-Write the review to the output file. The examples below show the desired structure (the fences are illustrative — do NOT wrap the actual output file content in a code fence):
+The parent writes the review to the output file; a worker writes the same format to STDOUT instead (Section 2). The examples below show the desired structure (the fences are illustrative — do NOT wrap the actual output file content in a code fence):
 
 Review header:
 
@@ -109,6 +118,8 @@ Review header:
     **Model**: <if known, model name used for review here>
 
     ---
+
+    <an Unreviewed files section, when a split review lost a worker (Section 2)>
 
     <issues in priority order, or a statement that no issues were found>
 
