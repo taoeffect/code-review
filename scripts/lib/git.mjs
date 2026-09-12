@@ -535,6 +535,11 @@ function splitLines(text) {
 
 // `--numstat -z` writes "added TAB deleted TAB path NUL". A rename or copy
 // leaves the path field empty and follows it with old NUL new NUL.
+//
+// `-z` hands the path over raw, with no quoting, so only the first two tabs are
+// field separators and a name holding a tab keeps its own. Splitting on every
+// tab cut such a path short, and the cut key then missed in the status map, so
+// the record also lost its status.
 function parseNumstatZ(text) {
   const fields = text.split("\0");
   const records = [];
@@ -542,10 +547,18 @@ function parseNumstatZ(text) {
   while (i < fields.length) {
     const head = fields[i++];
     if (head === "") continue;
-    const [addedText, deletedText, inlinePath] = head.split("\t");
-    let path = inlinePath;
+    const firstTab = head.indexOf("\t");
+    const secondTab = firstTab === -1 ? -1 : head.indexOf("\t", firstTab + 1);
+    if (secondTab === -1) {
+      throw new GitError(`could not read the numstat record: ${head}`, "NUMSTAT_UNREADABLE");
+    }
+    const addedText = head.slice(0, firstTab);
+    const deletedText = head.slice(firstTab + 1, secondTab);
+    // A rename or a copy head is exactly "0 TAB 0 TAB", so the path is empty
+    // and the two sides are the fields after it.
+    let path = head.slice(secondTab + 1);
     let oldPath = null;
-    if (path === "" || path === undefined) {
+    if (path === "") {
       oldPath = fields[i++] ?? "";
       path = fields[i++] ?? "";
     }

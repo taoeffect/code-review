@@ -2085,6 +2085,13 @@ for (const quotePath of [true, false]) {
     check.eq(full.includes(CHINESE_OCTAL), quotePath, "core.quotepath decides how git writes the names");
     check.ok(full.includes(LATIN1_WORD), "full.diff holds the latin1 byte");
 
+    // `--numstat -z` hands a path over raw, so a name holding a tab is where
+    // the count parser can lose the tail and, with it, the status lookup that
+    // is keyed by the path.
+    check.deep(prepped.files.map((file) => file.path).sort(), [...ODD_NAMES].sort(), "prep file names");
+    const tabbed = prepped.files.find((file) => file.path === "src/tab\there.txt");
+    check.eq(tabbed?.status, "A", "the added file whose name holds a tab keeps its status");
+
     const written = Buffer.concat(manifest.slices.map((slice) => readFileSync(join(prepped.runDir, slice.path))));
     check.ok(written.includes(LATIN1_WORD), "the slices keep the latin1 byte");
     check.ok(!written.includes(REPLACEMENT), "no slice holds a replacement character");
