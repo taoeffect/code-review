@@ -68,7 +68,13 @@ const DIFF_CONFIG = [
   "-c",
   "diff.dstPrefix=b/",
 ];
-const DIFF_FLAGS = ["--no-color", "--no-ext-diff", "--no-textconv"];
+// `--find-renames` sits here, not on one call, so the counts and the patch we
+// write out describe the same trees. It overrides `diff.renames` in each of
+// its three values. Left to that setting, `false` turns a rename into a full
+// delete plus a full add in the patch while `numstat` still reports two
+// changed lines, and `copies` turns a copy into a zero-line record in the
+// patch while the counts call it a whole new file.
+const DIFF_FLAGS = ["--no-color", "--no-ext-diff", "--no-textconv", "--find-renames"];
 
 export class GitError extends Error {
   constructor(message, code = "GIT_FAILED") {
@@ -464,7 +470,6 @@ export function numstat({ from, to, excludes = DEFAULT_EXCLUDES }, opts = {}) {
     ...DIFF_FLAGS,
     ...extra,
     "-z",
-    "--find-renames",
     from,
     to,
     "--",

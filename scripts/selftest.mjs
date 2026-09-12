@@ -1287,6 +1287,55 @@ test("prep: hostile diff config cannot change the diff shape", (check) => {
   }
 });
 
+// `diff.renames` decides what a rename is, and the counts and the patch must
+// not answer that question differently. Under the setting `false` the patch
+// alone splits a rename into a full delete plus a full add; under `copies` the
+// patch alone turns a copied file into a zero-line record. Either way the
+// reported total would describe trees `full.diff` does not hold, and the skill
+// picks the review path from that total.
+test("prep: a hostile diff.renames cannot change what the counts describe", (check) => {
+  const dir = newRepo("prep-renames");
+  put(dir, "src/moved.txt", lines("keep", 200));
+  put(dir, "src/origin.txt", lines("origin", 200));
+  commitAll(dir, "base commit");
+  gitAt(dir, ["checkout", "-q", "-b", "feature"]);
+  gitAt(dir, ["mv", "src/moved.txt", "src/landed.txt"]);
+  put(dir, "src/landed.txt", `${lines("keep", 199)}keep 200 edited\n`);
+  // A copy of one file plus an edit to its original: the record `copies` turns
+  // into a zero-line copy while `--find-renames` keeps it a whole new file.
+  put(dir, "src/clone.txt", lines("origin", 200));
+  put(dir, "src/origin.txt", `${lines("origin", 199)}origin 200 edited\n`);
+  commitAll(dir, "move, copy, and edit");
+
+  for (const setting of ["false", "copies"]) {
+    gitAt(dir, ["config", "diff.renames", setting]);
+    const globalConfig = join(WORK, `renames-${setting}.gitconfig`);
+    writeFileSync(globalConfig, `[diff]\n\trenames = ${setting}\n`);
+
+    const before = snapshot(dir);
+    const out = jsonOut(check, review(dir, ["prep"], { GIT_CONFIG_GLOBAL: globalConfig }), `prep diff.renames=${setting}`);
+    unchanged(check, before, snapshot(dir), `prep diff.renames=${setting}`);
+    if (!out) continue;
+
+    const parsed = parseDiff(readDiff(out.diffFile));
+    check.none(checkParse(parsed), `full.diff checkParse at diff.renames=${setting}`);
+    check.eq(
+      out.totalChanged,
+      parsed.totals.changed,
+      `the reported total is the total in full.diff at diff.renames=${setting}`,
+    );
+    check.deep(
+      out.files.map((file) => `${file.path}:${file.status}`).sort(),
+      parsed.files.map((file) => `${file.path}:${file.status}`).sort(),
+      `the reported records are the records in full.diff at diff.renames=${setting}`,
+    );
+    const landed = out.files.find((file) => file.path === "src/landed.txt");
+    check.eq(landed?.status, "R", `the rename survives diff.renames=${setting}`);
+    check.eq(landed?.oldPath, "src/moved.txt", `the old path at diff.renames=${setting}`);
+    check.eq(landed?.changed, 2, `the rename counts two changed lines at diff.renames=${setting}`);
+  }
+});
+
 test("prep: a stale marked run goes, a neighbour stays", (check) => {
   const dir = simpleRepo("prep-stale");
   const first = jsonOut(check, review(dir, ["prep"]), "first prep");
