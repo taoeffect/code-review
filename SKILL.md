@@ -66,6 +66,13 @@ does; it is then marked `oversized`. Slice IDs need not follow a large file's
 reading order. Use manifest assignments. Suggested batches are optional; regroup
 related slices if useful, with at most three agents per batch and full coverage.
 
+Only `runDir`, `diffFile`, `sourceDir`, `sliceDir`, and `manifestFile` are
+absolute. Every other path is relative and must be joined before it leaves the
+parent: a slice's `path`, such as `slices/slice-01.diff`, is relative to
+`runDir`, and a file part's `path` and `oldPath` are repository paths, so they
+sit under `sourceDir`. A bare relative path in a packet resolves against the
+worker's own working directory, which is a different folder.
+
 - **OMP:** Use one native `task` per slice with the `reviewer` agent. Put the
   shared review contract in batch `context` and slice data in each task. Wait for
   the full batch before starting the next.
@@ -74,11 +81,12 @@ related slices if useful, with at most three agents per batch and full coverage.
   `crush run -q -m <large> --small-model <small> "$PROMPT"`. Collect each with
   `job_output`. Wait for the full batch before starting the next.
 
-Each packet identifies `sourceDir`, its slice diff, and the exact manifest file
-parts and ranges. Include Sections 3 and 4 plus all user context. Require
-read-only inspection and full assigned coverage. Permit wider source inspection
-only for context. Do not let workers launch subagents or write the final review.
-Name the worker's output channel in every packet, with this wording:
+Each packet identifies `sourceDir`, its slice diff by absolute path, and the
+exact manifest file parts and ranges. Include Sections 3 and 4 plus all user
+context. Require read-only inspection and full assigned coverage. Permit wider
+source inspection only for context. Do not let workers launch subagents or write
+the final review. Name the worker's output channel in every packet, with this
+wording:
 
 > Write your complete review to STDOUT in your final response, using Section 4's
 > Markdown review format. Do not write your review to any file. The file-writing
