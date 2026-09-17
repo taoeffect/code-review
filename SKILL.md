@@ -21,7 +21,8 @@ node <skill-dir>/scripts/review.mjs prep [--base <ref>] [--exclude <pattern>]...
 
 The default base is local `main`, then local `master`. Pass a user-supplied base
 to `--base`. `prep` uses local refs and does not fetch. It prints one JSON object
-to stdout; warnings and errors go to stderr. Keep all reported fields.
+to stdout; warnings and errors go to stderr. Do not drop fields from that JSON;
+later steps depend on them.
 
 The command creates `diffFile` and `sourceDir` from a virtual merge. It never
 writes to HEAD, the real index, or working files. Inspect source under
@@ -34,23 +35,30 @@ Exit codes:
 - `split`: 0 success; 1 other failure; 6 failed self-check.
 - `clean`: 0 success; 1 failure.
 
-Check every command's exit code. On nonzero, report the stated problem and stop
-reviewing. After a split or review failure, clean a known run as in Section 5;
-report any cleanup failure too. For `prep` code 2, ask the user to commit, stash,
-or discard the changes. Edits inside a submodule are the one exception: they
-never reach this review, so they do not give code 2. A submodule commit that
-differs from the one the parent records still does, because that is a change to
-the parent. A base-behind warning concerns the existing local tracking ref only.
+Check every command's exit code. On any nonzero exit code, report the error message
+and stop. If `prep` succeeded but a subsequent `split` or review step fails, clean
+the active `runDir` as described in Section 5, reporting any cleanup failure.
 
-If `files` is empty, write a no-changes note, clean as in Section 5, and stop.
-Zero `totalChanged` with a nonempty `files` is still work: a rename, a mode
-change, or a replaced binary changes behaviour without changing a line. Review
-those records for their effects — for a rename, references to the old path,
-relative paths inside the moved file, and anything keyed to a filename or
-location — rather than re-reviewing unchanged code.
+For `prep` exit code 2 (dirty working tree), ask the user to commit, stash, or
+discard their changes. Note that uncommitted edits inside a submodule checkout do
+not trigger code 2 because they are not part of this review; however, a changed
+submodule commit pointer (gitlink) in the parent repository does trigger code 2.
+Any base-behind warning emitted by `prep` is informational only and refers to the
+local tracking ref.
 
-If `massive` is false, review the complete `diffFile` using Sections 3 and 4.
-Otherwise, continue below.
+Handle the `prep` output as follows:
+
+- **Empty `files`:** If `files` is empty, write a note stating no changes were found,
+  clean the run via Section 5, and stop.
+- **Zero `totalChanged` with nonempty `files`:** A pure rename, file mode change, or
+  binary replacement changes behavior without adding or deleting lines. Review
+  these records for side effects—for renames, check old-path references, relative
+  paths within moved files, and filename- or location-sensitive behavior—rather
+  than re-reviewing unchanged contents.
+- **Single-agent review (`massive` is false):** Review the entire `diffFile` following
+  Sections 3 and 4, clean up and report via Section 5, and stop.
+- **Massive review (`massive` is true):** Proceed to Section 2 below to split and
+  delegate.
 
 ## 2. Split and delegate a massive review
 
@@ -60,27 +68,40 @@ At 1,000 changed lines or more, run:
 node <skill-dir>/scripts/review.mjs split --run-dir <runDir> [--target <lines>]
 ```
 
-The default target is 800. The printed JSON is also `manifest.json`. It lists
-slice paths, changed-line totals, file parts, new-line ranges, oversized status,
-and suggested batches. A slice exceeds the target only when one indivisible hunk
-does; it is then marked `oversized`. Slice IDs need not follow a large file's
-reading order. Use manifest assignments. Suggested batches are optional; regroup
-related slices if useful, with at most three agents per batch and full coverage.
+The target line count defaults to 800. `split` writes and prints `manifest.json`,
+which details slice file paths, changed-line counts, file parts, new-line ranges
+(`newLineRanges`), oversized flags, and suggested batches (`batches`).
 
-Only `runDir`, `diffFile`, `sourceDir`, `sliceDir`, and `manifestFile` are
-absolute. Every other path is relative and must be joined before it leaves the
-parent: a slice's `path`, such as `slices/slice-01.diff`, is relative to
-`runDir`, and a file part's `path` and `oldPath` are repository paths, so they
-sit under `sourceDir`. A bare relative path in a packet resolves against the
-worker's own working directory, which is a different folder.
+Key slicing and batching rules:
+- **Oversized slices:** A slice exceeds `--target` only when an individual diff hunk
+  exceeds it on its own; such slices are flagged as `oversized: true`.
+- **Slice ordering:** Slice IDs do not guarantee sequential reading order for a
+  large file split across multiple slices. Rely on each file part's assigned
+  `newLineRanges` rather than assuming order from slice numbers.
+- **Batching:** `batches` groups slices into suggested rounds of up to three slices.
+  You may regroup slices to keep related files together, provided every slice is
+  assigned and each batch runs at most three worker agents concurrently.
+
+Path handling for worker packets:
+In the manifest, `runDir`, `diffFile`, `sourceDir`, `sliceDir`, and `manifestFile`
+are absolute, but all slice and file paths are relative. You must convert all paths
+to absolute before dispatching packets to workers:
+- A slice's `path` (e.g. `slices/slice-01.diff`) is relative to `runDir` and must be
+  joined to `runDir`.
+- A file part's `path` and `oldPath` are repository paths and must be joined to
+  `sourceDir`.
+Never pass bare relative paths in worker packets.
 
 - **OMP:** Use one native `task` per slice with the `reviewer` agent. Put the
   shared review contract in batch `context` and slice data in each task. Wait for
   the full batch before starting the next.
-- **Crush:** Call `crush_info`. Convert `model (provider)` to `provider/model`.
-  From `sourceDir`, start at most three background processes with
-  `crush run -q -m <large> --small-model <small> "$PROMPT"`. Collect each with
-  `job_output`. Wait for the full batch before starting the next.
+- **Crush:** Call `crush_info` to get the configured `large` and `small` models.
+  Convert the `model (provider)` format into `provider/model` (for example,
+  `claude-3-5-sonnet (anthropic)` becomes `anthropic/claude-3-5-sonnet`).
+  With working directory set to `sourceDir`, launch at most three background
+  processes using `crush run -q -m <large> --small-model <small> "$PROMPT"` where
+  `$PROMPT` contains the full packet text. Collect results with `job_output`.
+  Wait for all workers in the current batch to finish before starting the next batch.
 
 Each packet identifies `sourceDir`, its slice diff by absolute path, and the
 exact manifest file parts and ranges. Include Sections 3 and 4 plus all user
@@ -96,20 +117,24 @@ wording:
 A worker that fails, or returns no usable review, is not retried; an explicit
 no-issues review is a usable result. The parent verifies the findings it does
 have against `sourceDir` and the complete `diffFile`, removes duplicates,
-resolves cross-slice findings, and writes the final review. Account for every
-manifest assignment as reviewed or unreviewed. If any is unreviewed, say so
-plainly in an **Unreviewed files** section placed immediately after the review
-header and before the first issue, listing each lost worker's assigned paths
-from the manifest, and the slice or ranges for a partial-file assignment.
+resolves cross-slice findings, and writes the final review.
+
+Account for every manifest assignment as either reviewed or unreviewed. If any
+worker fails or produces no usable review, document the unreviewed code in an
+`## Unreviewed files` section located immediately below the review header (before
+any issues). For each unreviewed item, list:
+- The file path(s)
+- The slice identifier
+- The hunk/new-line ranges if it was a partial-file assignment
 
 ## 3. Gather context and review
 
-Read each reported context file from `sourceDir` unless already available. Apply
-its normal directory scope. Use the reported commit subjects, the PR description,
-and every user instruction.
+Read any files listed in `contextFiles` from `sourceDir` (such as `AGENTS.md` or
+`README.md`) if not already loaded, observing any repository or directory guidelines
+they define. Incorporate the reported `commits` subjects, any provided PR/MR
+description, and all user instructions to understand the intent of the changes.
 
 Review the diff thoroughly. Check for bugs, security issues, DRY violations, and improvements that can be made through code simplification.
-
 Use read-only tool calls to explore the codebase for additional context as needed. Specifically:
 
 - **Investigate call sites**: When a function signature or behavior changes, use available code-search tools to find all callers and verify they are compatible with the change.
@@ -117,7 +142,7 @@ Use read-only tool calls to explore the codebase for additional context as neede
 - **Trace data flow**: Follow data through the changed code paths to verify correctness.
 - **Verify error handling**: Ensure new code paths handle errors appropriately.
 
-**DO NOT modify any source files during the review.** Apart from the temporary diff, the only file you write is the review output file. That file is the parent's: a worker writes no file at all (Section 2).
+**DO NOT modify any source files during the review.** The only file you write is the final review output file (unless outputting to STDOUT). A worker subagent must never write any files at all (see Section 2).
 
 ## 4. Format and write the review
 
@@ -174,7 +199,9 @@ After writing the review, run once:
 node <skill-dir>/scripts/review.mjs clean --run-dir <runDir>
 ```
 
-A missing run is refused. If its path is lost, use `clean --all`; it removes only
-marked tool-owned runs. Both forms print `{ "runRoot": ..., "removed": [...] }`.
-Clean a known run after a later failure too. Then report the output path and issue
-count at each severity.
+`clean` removes only marked tool-owned runs under the run root. If the specific
+`runDir` path was lost due to an error, run `node <skill-dir>/scripts/review.mjs clean --all`.
+Both commands output `{ "runRoot": ..., "removed": [...] }`.
+
+Finally, print a summary to the user indicating the path to the written review
+file and the total count of issues identified at each severity level (🔴, 🟡, ⚪).
