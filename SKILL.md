@@ -13,7 +13,7 @@ this SKILL.md file.
 
 ## 1. Prepare
 
-From the repository, run:
+From the git repository, run:
 
 ```bash
 node <skill-dir>/scripts/review.mjs prep [--base <ref>] [--exclude <pattern>]...
@@ -82,15 +82,15 @@ Key slicing and batching rules:
   You may regroup slices to keep related files together, provided every slice is
   assigned and each batch runs at most three worker agents concurrently.
 
-Path handling for worker packets:
+Path handling for worker prompts:
 In the manifest, `runDir`, `diffFile`, `sourceDir`, `sliceDir`, and `manifestFile`
 are absolute, but all slice and file paths are relative. You must convert all paths
-to absolute before dispatching packets to workers:
+to absolute before dispatching prompts to workers:
 - A slice's `path` (e.g. `slices/slice-01.diff`) is relative to `runDir` and must be
   joined to `runDir`.
 - A file part's `path` and `oldPath` are repository paths and must be joined to
   `sourceDir`.
-Never pass bare relative paths in worker packets.
+Never pass bare relative paths in worker prompts.
 
 - **OMP:** Use one native `task` per slice with the `reviewer` agent. Put the
   shared review contract in batch `context` and slice data in each task. Wait for
@@ -100,14 +100,14 @@ Never pass bare relative paths in worker packets.
   `claude-3-5-sonnet (anthropic)` becomes `anthropic/claude-3-5-sonnet`).
   With working directory set to `sourceDir`, launch at most three background
   processes using `crush run -q -m <large> --small-model <small> "$PROMPT"` where
-  `$PROMPT` contains the full packet text. Collect results with `job_output`.
+  `$PROMPT` contains the full prompt text. Collect results with `job_output`.
   Wait for all workers in the current batch to finish before starting the next batch.
 
-Each packet identifies `sourceDir`, its slice diff by absolute path, and the
+Each worker prompt identifies `sourceDir`, its slice diff by absolute path, and the
 exact manifest file parts and ranges. Include Sections 3 and 4 plus all user
 context. Require read-only inspection and full assigned coverage. Permit wider
 source inspection only for context. Do not let workers launch subagents or write
-the final review. Name the worker's output channel in every packet, with this
+the final review. Name the worker's output channel in every prompt, with this
 wording:
 
 > Write your complete review to STDOUT in your final response, using Section 4's
