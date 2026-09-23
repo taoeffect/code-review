@@ -134,8 +134,13 @@ Read any files listed in `contextFiles` from `sourceDir` (such as `AGENTS.md` or
 they define. Incorporate the reported `commits` subjects, any provided PR/MR
 description, and all user instructions to understand the intent of the changes.
 
-Review the diff thoroughly. Check for bugs, security issues, DRY violations, and improvements that can be made through code simplification.
-Use read-only tool calls to explore the codebase for additional context as needed. Specifically:
+Review the diff thoroughly for:
+
+- **Highest priority**: any bugs, security issues, DRY violations, and improvements that can be made through code simplification
+- spelling or grammar mistakes in user-facing strings or log messages
+- poorly named identifiers like variables, selectors, functions/methods, types or classes
+
+As you review the diff, use read-only tool calls to explore the codebase for additional context as needed. Specifically:
 
 - **Investigate call sites**: When a function signature or behavior changes, use available code-search tools to find all callers and verify they are compatible with the change.
 - **Check for stale code**: Look for code that may have become dead or redundant as a result of the changes.
