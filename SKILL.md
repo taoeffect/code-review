@@ -103,6 +103,9 @@ Never pass bare relative paths in worker prompts.
   `$PROMPT` contains the full prompt text. Collect results with `job_output`.
   Wait for all workers in the current batch to finish before starting the next batch.
 
+While workers run, the parent simply waits on them instead of proceeding with its
+own review.
+
 Each worker prompt identifies `sourceDir`, its slice diff by absolute path, and the
 exact manifest file parts and ranges. Include Sections 3 and 4 plus all user
 context. Require read-only inspection and full assigned coverage. Permit wider
