@@ -2,6 +2,8 @@
 
 An agent skill to perform a sophisticated and comprehensive code review, outputting it to a `REVIEW.md` file by default.
 
+Large reviews are split across parallel subagents in OMP, Crush, and Claude Code.
+
 ## Installation
 
 ```

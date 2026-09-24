@@ -95,6 +95,10 @@ Never pass bare relative paths in worker prompts.
 - **OMP:** Use one native `task` per slice with the `reviewer` agent. Put the
   shared review contract in batch `context` and slice data in each task. Wait for
   the full batch before starting the next.
+- **Claude Code:** Use one `Agent` tool call per slice with
+  `subagent_type: general-purpose`, and send all of a batch's calls in a single
+  message. Wait for every worker in the batch to report back before starting the
+  next batch.
 - **Crush:** Call `crush_info` to get the configured `large` and `small` models.
   Convert the `model (provider)` format into `provider/model` (for example,
   `claude-3-5-sonnet (anthropic)` becomes `anthropic/claude-3-5-sonnet`).
