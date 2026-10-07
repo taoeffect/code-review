@@ -27,6 +27,7 @@ export const DEFAULT_EXCLUDES = [
   "**/poetry.lock",
   "**/Gemfile.lock",
   "**/composer.lock",
+  "**/deno.lock",
   "**/*.min.js",
   "**/*.min.css",
   "**/*.map",
