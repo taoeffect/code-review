@@ -73,6 +73,7 @@ which details slice file paths, changed-line counts, file parts, new-line ranges
 (`newLineRanges`), oversized flags, and suggested batches (`batches`).
 
 Key slicing and batching rules:
+
 - **Oversized slices:** A slice exceeds `--target` only when an individual diff hunk
   exceeds it on its own; such slices are flagged as `oversized: true`.
 - **Slice ordering:** Slice IDs do not guarantee sequential reading order for a
@@ -86,10 +87,12 @@ Path handling for worker prompts:
 In the manifest, `runDir`, `diffFile`, `sourceDir`, `sliceDir`, and `manifestFile`
 are absolute, but all slice and file paths are relative. You must convert all paths
 to absolute before dispatching prompts to workers:
+
 - A slice's `path` (e.g. `slices/slice-01.diff`) is relative to `runDir` and must be
   joined to `runDir`.
 - A file part's `path` and `oldPath` are repository paths and must be joined to
   `sourceDir`.
+
 Never pass bare relative paths in worker prompts.
 
 - **OMP:** Use one native `task` per slice with the `reviewer` agent. Put the
@@ -99,13 +102,9 @@ Never pass bare relative paths in worker prompts.
   `subagent_type: general-purpose`, and send all of a batch's calls in a single
   message. Wait for every worker in the batch to report back before starting the
   next batch.
-- **Crush:** Call `crush_info` to get the configured `large` and `small` models.
-  Convert the `model (provider)` format into `provider/model` (for example,
-  `claude-3-5-sonnet (anthropic)` becomes `anthropic/claude-3-5-sonnet`).
-  With working directory set to `sourceDir`, launch at most three background
-  processes using `crush run -q -m <large> --small-model <small> "$PROMPT"` where
-  `$PROMPT` contains the full prompt text. Collect results with `job_output`.
-  Wait for all workers in the current batch to finish before starting the next batch.
+- **Crush:** Use one `agent` tool call per slice with `access: read`, and send
+  all of a batch's calls in a single message. Wait for every worker in the batch
+  to report back before starting the next batch.
 
 While workers run, the parent simply waits on them instead of proceeding with its
 own review.
@@ -130,6 +129,7 @@ Account for every manifest assignment as either reviewed or unreviewed. If any
 worker fails or produces no usable review, document the unreviewed code in an
 `## Unreviewed files` section located immediately below the review header (before
 any issues). For each unreviewed item, list:
+
 - The file path(s)
 - The slice identifier
 - The hunk/new-line ranges if it was a partial-file assignment
