@@ -103,11 +103,24 @@ Never pass bare relative paths in worker prompts.
   message. Wait for every worker in the batch to report back before starting the
   next batch.
 - **Crush:** Use one `agent` tool call per slice with `access: read`, and send
-  all of a batch's calls in a single message. Wait for every worker in the batch
-  to report back before starting the next batch.
+  all of a batch's calls in a single message. Each `agent` call blocks until its
+  worker finishes and returns that worker's review as the tool result. Wait for
+  every worker in the batch to report back before starting the next batch.
+  Do not use `agent_dispatch`, and do not start workers as background shell jobs
+  (`crush run … &`, `job_output`): their reports arrive only in a later turn, and
+  a non-interactive `crush run` exits as soon as your turn ends, stopping every
+  worker still running. If your tools include `agent_dispatch` but not `agent`
+  (as in `crush run` up to at least v0.102.0), review the slices yourself, one
+  batch at a time, as described below.
 
 While workers run, the parent simply waits on them instead of proceeding with its
 own review.
+
+Do not end your turn, or announce that you are waiting, while any worker is still
+running or before the final review is written. Ending the turn is not waiting: in
+a non-interactive run (such as CI) it ends the run, the workers' reports never
+arrive, and no review is written. If no blocking way to run workers is available,
+review the slices yourself, one batch at a time, instead of delegating.
 
 Each worker prompt identifies `sourceDir`, its slice diff by absolute path, and the
 exact manifest file parts and ranges. Include Sections 3 and 4 plus all user
