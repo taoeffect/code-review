@@ -211,9 +211,13 @@ After writing the review, run once:
 node <skill-dir>/scripts/review.mjs clean --run-dir <runDir>
 ```
 
-`clean` removes only marked tool-owned runs under the run root. If the specific
+`clean` removes only marked tool-owned runs under the run root. Always clean your
+own run with `--run-dir`: other reviews, for example in other worktrees of the same
+repository, may be using the same run root at the same time. If the specific
 `runDir` path was lost due to an error, run `node <skill-dir>/scripts/review.mjs clean --all`.
-Both commands output `{ "runRoot": ..., "removed": [...] }`.
+It removes only runs idle for 24 hours, so it never touches a review still in
+progress; your lost run is swept by a later `prep` or `clean --all` once it is
+that old. Both commands output `{ "runRoot": ..., "removed": [...] }`.
 
 Finally, print a summary to the user indicating the path to the written review
 file and the total count of issues identified at each severity level (🔴, 🟡, ⚪).

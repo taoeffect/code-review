@@ -30,6 +30,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -429,6 +430,15 @@ function walkFiles(root, current = root, out = []) {
 // ---------------------------------------------------------------------------
 
 /** A base branch, plus a feature branch that adds one file. */
+/**
+ * Make a run look idle for longer than the sweep waits (24 hours), as a run
+ * left behind by a finished or interrupted review would be.
+ */
+function ageRun(runDir) {
+  const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
+  utimesSync(join(runDir, MARKER), old, old);
+}
+
 function simpleRepo(name, { added = 40 } = {}) {
   const dir = newRepo(name);
   put(dir, "README.md", "# self test\n");
@@ -2122,6 +2132,7 @@ test("prep: a stale marked run goes, a neighbour stays", (check) => {
   const loose = join(runRoot, "loose.txt");
   mkdirSync(neighbour, { recursive: true });
   writeFileSync(loose, "keep me\n");
+  ageRun(first.runDir);
 
   const before = snapshot(dir);
   const result = review(dir, ["prep"]);
@@ -2129,13 +2140,34 @@ test("prep: a stale marked run goes, a neighbour stays", (check) => {
   const second = jsonOut(check, result, "second prep");
   check.has(
     result.stderr,
-    "Removed 1 run folder(s) left by an earlier review, finished or interrupted.",
+    "Removed 1 run folder(s) left idle for 24 hours by an earlier review, finished or interrupted.",
     "the sweep is reported, and the sentence does not claim the run was interrupted",
   );
   check.eq(existsSync(first.runDir), false, "the stale run is gone");
   check.ok(existsSync(neighbour), "an unmarked neighbour stays");
   check.ok(existsSync(loose), "a loose file stays");
   check.ok(second && existsSync(second.runDir), "the new run folder is there");
+});
+
+test("prep: a recent run stays, as another review may still be using it", (check) => {
+  // Every worktree of a repository shares one run root, so two reviews can run
+  // at once. A prep in one must not pull the other's diff and source away.
+  const dir = simpleRepo("prep-concurrent");
+  const first = jsonOut(check, review(dir, ["prep"]), "first prep");
+  if (!first) return;
+  const result = review(dir, ["prep"]);
+  const second = jsonOut(check, result, "second prep");
+  check.hasNot(result.stderr, "Removed", "nothing is swept");
+  check.ok(existsSync(join(first.runDir, "full.diff")), "the first run keeps its diff");
+  check.ok(existsSync(join(first.runDir, "source")), "the first run keeps its source snapshot");
+  check.ok(second && existsSync(second.runDir), "the new run folder is there");
+
+  // split marks the run as in use, so a long review is not mistaken for an idle one
+  ageRun(first.runDir);
+  jsonOut(check, review(dir, ["split", "--run-dir", first.runDir]), "split of the first run");
+  const third = review(dir, ["prep"]);
+  jsonOut(check, third, "third prep");
+  check.ok(existsSync(join(first.runDir, "full.diff")), "a run split since stays");
 });
 
 test("prep: a sweep it cannot finish still hands over a complete run", (check) => {
@@ -2235,6 +2267,7 @@ test("prep: a run folder it cannot create or mark fails with a sentence", (check
   const runRoot = dirname(first.runDir);
   check.deep(readdirSync(runRoot), [basename(first.runDir)], "no unmarked folder is left behind");
 
+  ageRun(first.runDir);
   const cleaned = jsonOut(check, review(dir, ["clean", "--all"]), "clean --all");
   check.deep(cleaned?.removed, [first.runDir], "clean --all removes the earlier run and nothing else");
 
@@ -2710,6 +2743,12 @@ test("clean: --all removes only marked runs", (check) => {
   const second = join(runRoot, "run-by-hand");
   mkdirSync(second, { recursive: true });
   writeFileSync(join(second, MARKER), "{}\n");
+  ageRun(first.runDir);
+  ageRun(second);
+  // a recent run may belong to a review still running in another worktree
+  const recent = join(runRoot, "run-in-progress");
+  mkdirSync(recent, { recursive: true });
+  writeFileSync(join(recent, MARKER), "{}\n");
   const unmarked = join(runRoot, "unmarked");
   mkdirSync(unmarked, { recursive: true });
   const outside = join(WORK, "clean-all-outside");
@@ -2726,6 +2765,7 @@ test("clean: --all removes only marked runs", (check) => {
   check.deep([...(out?.removed ?? [])].sort(), [first.runDir, second].sort(), "removed");
   check.eq(existsSync(first.runDir), false, "the prep run is gone");
   check.eq(existsSync(second), false, "the hand-made marked run is gone");
+  check.ok(existsSync(recent), "a recent marked run stays");
   check.ok(existsSync(unmarked), "an unmarked folder stays");
   check.ok(existsSync(linked), "a symlink stays");
   check.ok(existsSync(outside), "what the symlink points at stays");
@@ -2742,6 +2782,7 @@ test("clean: --all removes only marked runs", (check) => {
   const third = join(runRoot, "run-from-git-dir");
   mkdirSync(third, { recursive: true });
   writeFileSync(join(third, MARKER), "{}\n");
+  ageRun(third);
   const fromGitDir = jsonOut(check, review(runRoot, ["clean", "--all"]), "clean --all from inside the git folder");
   check.eq(fromGitDir?.runRoot, runRoot, "the run root found from inside the git folder");
   check.deep(fromGitDir?.removed, [third], "the sweep works from inside the git folder");
@@ -2934,6 +2975,8 @@ test("end to end: a linked worktree shares the main checkout's run root", (check
   checkReverseApply(check, prepped.runDir, manifest, "split from the main checkout");
 
   // `clean --all` has to find the same root from the worktree that `prep` used.
+  // It sweeps idle runs only, so the run is aged first.
+  ageRun(prepped.runDir);
   const cleaned = jsonOut(check, review(linked, ["clean", "--all"]), "clean from the linked worktree");
   check.eq(cleaned?.runRoot, shared, "clean reports the shared run root");
   check.deep(cleaned?.removed, [prepped.runDir], "removed");
