@@ -15,6 +15,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
@@ -59,6 +60,10 @@ const MASSIVE_CHANGED_LINES = 1000;
 
 const RUN_ROOT_NAME = "code-review";
 const MARKER_NAME = ".code-review-run";
+// Several reviews can share one run root: every worktree of a repository has
+// the same git common dir. A run is only swept once it has been idle this long,
+// so a review still in progress elsewhere keeps its folder.
+const STALE_RUN_MS = 24 * 60 * 60 * 1000;
 const DIFF_CONTEXT = 10;
 
 /** Project files worth reading before reviewing, in the order to prefer them. */
@@ -107,7 +112,9 @@ Commands:
       stdout naming what was removed.
 
       --run-dir <path>     The one run folder to remove.
-      --all                Remove every run folder left in the run root.
+      --all                Remove every run folder left in the run root that
+                           has been idle for 24 hours. A newer run may belong to
+                           a review still running in another worktree.
 
 Exit codes:
   Every command:  0 success, 1 failure.
@@ -265,7 +272,7 @@ function prep(args) {
   try {
     const stale = sweepRuns(runRoot, runDir);
     if (stale.length > 0) {
-      warn(`Removed ${stale.length} run folder(s) left by an earlier review, finished or interrupted.`);
+      warn(`Removed ${stale.length} run folder(s) left idle for 24 hours by an earlier review, finished or interrupted.`);
     }
   } catch (error) {
     warn(`Could not remove every earlier run folder under ${runRoot}: ${error.message}`);
@@ -288,6 +295,7 @@ function split(args) {
   const target = wholeNumber(flags.target, "--target", DEFAULT_TARGET);
 
   const runDir = resolveManagedRun(flags.runDir);
+  touchRun(runDir);
   const diffFile = join(runDir, "full.diff");
   // `latin1` maps every byte to one character and back, so a diff of Latin-1,
   // CP1252, or Shift-JIS source keeps its exact bytes on the way through. Read
@@ -481,15 +489,18 @@ function createRun(runRoot) {
 
 /**
  * Remove the run folders of earlier reviews, except `keep`. A review is one run
- * and cannot resume, so a run already sitting here is finished with, whether
- * its review ended or was interrupted. Only marked direct children go, which
- * leaves anything else under the git folder alone.
+ * and cannot resume, so a run idle for `STALE_RUN_MS` is finished with, whether
+ * its review ended or was interrupted. A newer run is left alone: it may belong
+ * to a review still running in another worktree of the same repository, and
+ * removing it would pull its diff and source out from under it. Only marked
+ * direct children go, which leaves anything else under the git folder alone.
  *
  * `keep` is the run this command has just made, and a plain string comparison
  * finds it because both paths are built by joining the same `runRoot`.
  */
 function sweepRuns(runRoot, keep = null) {
   const removed = [];
+  const now = Date.now();
   let entries;
   try {
     entries = readdirSync(runRoot, { withFileTypes: true });
@@ -503,10 +514,34 @@ function sweepRuns(runRoot, keep = null) {
     const candidate = join(runRoot, entry.name);
     if (candidate === keep) continue;
     if (!isMarkedRun(candidate)) continue;
+    if (!isStaleRun(candidate, now)) continue;
     rmSync(candidate, { recursive: true, force: true });
     removed.push(candidate);
   }
   return removed;
+}
+
+/**
+ * A run is stale when its marker has not been touched for `STALE_RUN_MS`.
+ * `prep` writes the marker and `split` touches it, so the age is the time since
+ * the review last used the run.
+ */
+function isStaleRun(dir, now) {
+  try {
+    return now - lstatSync(join(dir, MARKER_NAME)).mtimeMs >= STALE_RUN_MS;
+  } catch {
+    return false;
+  }
+}
+
+/** Record that a review is still using its run, so no sweep takes it. */
+function touchRun(runDir) {
+  const now = new Date();
+  try {
+    utimesSync(join(runDir, MARKER_NAME), now, now);
+  } catch {
+    // Only the sweep reads this date: failing to move it is no reason to fail.
+  }
 }
 
 /** A run folder is ours when it holds the marker file as a regular file. */
