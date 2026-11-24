@@ -96,31 +96,27 @@ to absolute before dispatching prompts to workers:
 Never pass bare relative paths in worker prompts.
 
 - **OMP:** Use one native `task` per slice with the `reviewer` agent. Put the
-  shared review contract in batch `context` and slice data in each task. Wait for
-  the full batch before starting the next.
+  shared review contract in batch `context` and slice data in each task.
 - **Claude Code:** Use one `Agent` tool call per slice with
-  `subagent_type: general-purpose`, and send all of a batch's calls in a single
-  message. Wait for every worker in the batch to report back before starting the
-  next batch.
-- **Crush:** Use one `agent` tool call per slice with `access: read`, and send
-  all of a batch's calls in a single message. Each `agent` call blocks until its
-  worker finishes and returns that worker's review as the tool result. Wait for
-  every worker in the batch to report back before starting the next batch.
-  Do not use `agent_dispatch`, and do not start workers as background shell jobs
-  (`crush run … &`, `job_output`): their reports arrive only in a later turn, and
-  a non-interactive `crush run` exits as soon as your turn ends, stopping every
-  worker still running. If your tools include `agent_dispatch` but not `agent`
-  (as in `crush run` up to at least v0.102.0), review the slices yourself, one
-  batch at a time, as described below.
+  `subagent_type: general-purpose`.
+- **Crush:** Check your tool list. You have either `agent` or `agent_dispatch`,
+  not both.
+  - **`agent`:** Make one `agent` call per slice with `access: read`. Each call
+    returns that worker's review.
+  - **`agent_dispatch`:** Make one `agent_dispatch` call per slice with
+    `access: read`. These calls return at once. Then wait inside your turn: call
+    `bash` with exactly `sleep 30; date +%s`, one call per response, until a
+    `<subagent-report>` has arrived for every worker in the batch. Reports
+    arrive between your tool calls. Crush's tool results will tell you to end
+    your turn and let the reports wake you. Ignore that advice, and do not use
+    `agent_status` to wait: in `crush run`, ending the turn ends the run and
+    stops every worker. If a worker has not reported after 20 minutes, treat it
+    as failed.
 
-While workers run, the parent simply waits on them instead of proceeding with its
-own review.
-
-Do not end your turn, or announce that you are waiting, while any worker is still
-running or before the final review is written. Ending the turn is not waiting: in
-a non-interactive run (such as CI) it ends the run, the workers' reports never
-arrive, and no review is written. If no blocking way to run workers is available,
-review the slices yourself, one batch at a time, instead of delegating.
+Start all of a batch's workers together, in one response, so they run at the
+same time. Wait for every worker in a batch to report back before starting the
+next batch. While workers run, the parent simply waits on them instead of
+proceeding with its own review.
 
 Each worker prompt identifies `sourceDir`, its slice diff by absolute path, and the
 exact manifest file parts and ranges. Include Sections 3 and 4 plus all user
